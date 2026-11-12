@@ -1,0 +1,222 @@
+"""One submission, end to end: stages, comparisons, documents, message, audit."""
+
+from __future__ import annotations
+
+import json
+import time
+
+import streamlit as st
+
+from database import db
+from frontend import ui
+
+st.set_page_config(page_title="Vendor record · VendorFlow", page_icon="◆", layout="wide")
+ui.apply_theme()
+ui.sidebar("record")
+db.init_db()
+
+ui.page_header(
+    "Vendor record",
+    "The whole run, inspectable",
+    "Every stage, every comparison, every rule that fired, the document text behind it, and who "
+    "changed what afterwards.",
+)
+
+runs = db.list_submissions()
+if not runs:
+    st.markdown(
+        '<div class="card"><b>Nothing has been processed yet.</b>'
+        '<p class="note" style="margin:.4rem 0 0;">Run a submission and its record appears here.</p></div>',
+        unsafe_allow_html=True,
+    )
+    if st.button("Run a submission →", type="primary"):
+        st.switch_page("pages/1_Vendor_Submission.py")
+    st.stop()
+
+labels = {
+    f'{run["reference"]} · {run["legal_name"]} · {ui.STATUS_TEXT.get(run["status"], run["status"])}': run["id"]
+    for run in runs
+}
+current = st.session_state.get("record_id")
+keys = list(labels)
+default_index = next((index for index, key in enumerate(keys) if labels[key] == current), 0)
+picked = st.selectbox("Record", keys, index=default_index, key="record-picker")
+submission_id = labels[picked]
+st.session_state["record_id"] = submission_id
+
+bundle = db.get_submission_bundle(submission_id)
+if bundle is None:
+    st.error("That record could not be loaded.")
+    st.stop()
+
+submission = bundle["submission"]
+vendor = bundle["vendor"]
+st.write("")
+ui.decision_block(bundle)
+
+st.write("")
+actions = st.columns([1, 1, 1.4])
+if actions[0].button("← Dashboard"):
+    st.switch_page("pages/2_Admin_Dashboard.py")
+if actions[1].button("Run another submission"):
+    st.switch_page("pages/1_Vendor_Submission.py")
+export = {
+    "reference": submission["reference"],
+    "status": submission["status"],
+    "machine_status": submission["machine_status"],
+    "headline": submission["headline"],
+    "summary": submission["summary"],
+    "created_at": submission["created_at"],
+    "vendor": vendor,
+    "documents": [
+        {key: value for key, value in document.items() if key != "content"}
+        for document in bundle["documents"]
+    ],
+    "findings": bundle["findings"],
+    "field_checks": bundle["checks"],
+    "stages": bundle["stages"],
+    "events": bundle["events"],
+    "notification": {
+        "subject": submission["notification_subject"],
+        "body": submission["notification_body"],
+    },
+}
+actions[2].download_button(
+    "Export this record as JSON",
+    data=json.dumps(export, indent=2, default=str),
+    file_name=f'{submission["reference"]}.json',
+    mime="application/json",
+    key="export-json",
+)
+
+tab_run, tab_checks, tab_docs, tab_decision, tab_audit = st.tabs(
+    ["Run timeline", "Field comparisons", "Documents", "Decision & reply", "Audit log"]
+)
+
+# ----------------------------------------------------------------- timeline
+
+with tab_run:
+    st.write("")
+    placeholder = st.empty()
+    if st.button("Replay this run", key="replay"):
+        done: dict[str, dict] = {}
+        stages = bundle["stages"]
+        for index, stage in enumerate(stages, start=1):
+            done[stage["key"]] = stage
+            time.sleep(0.3)
+            placeholder.markdown(
+                ui.live_html(done, index, len(stages), finished=index == len(stages)),
+                unsafe_allow_html=True,
+            )
+    else:
+        placeholder.markdown(ui.timeline_html(bundle["stages"]), unsafe_allow_html=True)
+    st.caption(
+        "Stages run in a fixed order. A flag on any stage is carried forward, never dropped, and the "
+        "decision stage applies the severity ordering."
+    )
+
+# ------------------------------------------------------------------- checks
+
+with tab_checks:
+    st.write("")
+    st.markdown(
+        '<p class="note">The form is compared with what the documents actually say. Name matching '
+        "ignores company suffixes and word order; identifiers are compared exactly, ignoring spaces "
+        "and dashes.</p>",
+        unsafe_allow_html=True,
+    )
+    ui.checks_table(bundle["checks"])
+
+# -------------------------------------------------------------------- docs
+
+with tab_docs:
+    ui.documents_block(bundle, key_prefix=f"record-{submission_id}")
+
+# ---------------------------------------------------------------- decision
+
+with tab_decision:
+    st.write("")
+    left, right = st.columns([1.15, 1])
+    with left:
+        st.markdown('<div class="eyebrow">Findings</div>', unsafe_allow_html=True)
+        ui.findings_block(bundle["findings"])
+    with right:
+        st.markdown('<div class="eyebrow">What the vendor is asked for</div>', unsafe_allow_html=True)
+        required = [
+            finding["vendor_message"]
+            for finding in bundle["findings"]
+            if finding["severity"] in {"pending", "reject"} and finding["vendor_message"]
+        ]
+        if required:
+            items = "".join(
+                f'<li style="margin-bottom:.45rem;">{ui.esc(item)}</li>' for item in required
+            )
+            st.markdown(
+                f'<div class="card"><ol style="margin:0;padding-left:1.1rem;font-size:.86rem;'
+                f'line-height:1.55;">{items}</ol></div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div class="card"><p class="note" style="margin:0;">Nothing. This pack is approved '
+                "as it stands.</p></div>",
+                unsafe_allow_html=True,
+            )
+        st.markdown(
+            f'<p class="note" style="margin-top:.7rem;">Extraction method: '
+            f'{ui.esc(submission["extraction_method"] or "none")}. '
+            "Rules produced the verdict; the model, when a key is configured, only fills fields the "
+            "labels missed.</p>",
+            unsafe_allow_html=True,
+        )
+    st.write("")
+    st.markdown('<div class="eyebrow">Reply drafted for the vendor</div>', unsafe_allow_html=True)
+    ui.notification_block(bundle)
+
+# --------------------------------------------------------------------- audit
+
+with tab_audit:
+    st.write("")
+    st.markdown('<div class="eyebrow">Audit log</div>', unsafe_allow_html=True)
+    for event in bundle["events"]:
+        st.markdown(
+            f'<div style="font-size:.85rem;padding:.35rem 0;border-bottom:1px dashed rgba(28,25,21,.12);">'
+            f'<b>{ui.esc(event["event"])}</b> — {ui.esc(event["detail"])} '
+            f'<span class="note">· {ui.esc(event["actor"])} · {ui.esc(event["created_at"])}</span></div>',
+            unsafe_allow_html=True,
+        )
+
+    st.write("")
+    st.markdown(
+        '<div class="card"><b>Reviewer verdict</b>'
+        '<p class="note" style="margin:.3rem 0 0;">A person can override the machine decision. The '
+        "override is appended to the audit log and updates this vendor&rsquo;s registry status, so the "
+        "next submission is checked against it.</p></div>",
+        unsafe_allow_html=True,
+    )
+    with st.form("review-verdict"):
+        form = st.columns([1, 1, 2])
+        verdict = form[0].selectbox(
+            "Verdict",
+            ["approved", "pending", "rejected"],
+            index=["approved", "pending", "rejected"].index(submission["status"])
+            if submission["status"] in {"approved", "pending", "rejected"}
+            else 1,
+            format_func=lambda value: ui.STATUS_TEXT[value],
+            key="verdict-status",
+        )
+        reviewer = form[1].text_input("Reviewer", "Procurement reviewer", key="verdict-actor")
+        note = form[2].text_input(
+            "Reason for the change",
+            placeholder="What did you check, and what changed your mind?",
+            key="verdict-note",
+        )
+        if st.form_submit_button("Save verdict", type="primary"):
+            if not note.strip():
+                st.error("Add a short reason so the audit log is useful later.")
+            else:
+                db.apply_admin_decision(
+                    submission_id, verdict, note, reviewer, "reviewer_verdict"
+                )
+                st.success("Verdict saved to the audit log.")
+                st.rerun()
