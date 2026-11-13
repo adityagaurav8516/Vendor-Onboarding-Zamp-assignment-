@@ -17,7 +17,9 @@ from backend import layout_parser, ocr_engine
 
 MIN_TEXT_CHARS = 20
 SCANNED_PAGE_CHARS = int(os.getenv("VENDORFLOW_OCR_PAGE_CHARS", "40"))
-OCR_DPI = int(os.getenv("VENDORFLOW_OCR_DPI", "300"))
+# 200 DPI preserves legible business-document text while rendering less than half
+# as many pixels as 300 DPI. Override for unusually small or degraded scans.
+OCR_DPI = int(os.getenv("VENDORFLOW_OCR_DPI", "200"))
 MIN_KV_CONFIDENCE = float(os.getenv("VENDORFLOW_OCR_MIN_KV_CONFIDENCE", "0.6"))
 
 PLAIN_SUFFIXES = (".txt", ".text", ".md", ".csv")

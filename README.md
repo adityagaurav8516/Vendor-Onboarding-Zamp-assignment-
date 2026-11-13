@@ -146,9 +146,9 @@ support that claim, and a fake confidence score would be worse than saying it is
 ## 6. Using the app
 
 - **Overview** — the process map, the decision policy, and a one-click run for every scenario.
-- **Run a submission** — pick a prepared pack or fill in a form and attach your own PDFs/text files.
-  The run view draws each stage as it executes, then shows the verdict, the field comparisons, the
-  findings, and the drafted vendor email. The run is saved.
+- **Run a submission** — pick a prepared pack, fill in a form and attach your own PDFs, text files or
+  scans, or upload a submission JSON. The run view draws each stage as it executes, then shows the
+  verdict, the field comparisons, the findings, and the drafted vendor email. The run is saved.
 - **Dashboard** — history with status filters and search, decision mix, which rules fire most, an
   edge-case self-test, the vendor registry, CSV export, and demo reset.
 - **Vendor record** — the full run: replayable timeline, field comparisons, the text the parser read
@@ -192,6 +192,12 @@ A PDF with a text layer is read directly, so `Label: value` lines are still pick
 A scanned PDF, or a photo of a document, is rasterised and sent to PaddleOCR; the layout parser then
 rebuilds the labels and values from the positions of the recognised words (§8).
 
+The same JSON can be uploaded from **Run a submission → Upload a JSON**. Paths resolve from the
+directory the app was started in, and each slot also has a file picker so a document can be attached
+from the browser and replace its path. The parser behind both paths is
+`backend/submission_loader.py`; missing files are reported per slot and the run continues, while the
+CLI treats them as an error so a typo cannot silently drop a document.
+
 ---
 
 ## 8. Design decisions, assumptions, and what I left out
@@ -215,7 +221,7 @@ pending or warn rule, patch for wording or thresholds that cannot change a verdi
 **Scanned documents: OCR, then geometry.** A file is opened with PyMuPDF. If a page has a usable text
 layer, that text is used and nothing else runs — the demo packs and every existing document behave
 exactly as before. If a page has no usable text layer but does carry an image, the page is rendered at
-300 dpi and PaddleOCR (an open-source PP-OCR model) returns words with boxes and confidences. Images
+200 dpi and PaddleOCR's mobile models return words with boxes and confidences. Images
 uploaded directly take the same path. OCR is never the only reader: the PDF text layer always wins
 where it exists, and a page that fails OCR is reported, not guessed at.
 
@@ -227,7 +233,10 @@ in a row, or from the line under a label. Candidate labels are matched to the ca
 identifier values are de-spaced so the existing checksums keep working.
 
 PaddleOCR downloads its recognition models on first use (into `~/.paddlex`) and needs network access
-once; after that the pipeline is offline. `VENDORFLOW_OCR=off` skips OCR entirely, and
+once; after that the pipeline is offline. The fast defaults are 200 dpi plus the PP-OCRv5 mobile
+detector and recognizer; set `VENDORFLOW_OCR_DPI=300` for tiny or degraded text, or override either
+model with `VENDORFLOW_OCR_DETECTION_MODEL` and `VENDORFLOW_OCR_RECOGNITION_MODEL`. Repeated page
+images are cached for the lifetime of the app process. `VENDORFLOW_OCR=off` skips OCR entirely, and
 `VENDORFLOW_OCR_MKLDNN=1` opts back into oneDNN, which paddlepaddle 3.3 fails on for its detection
 model on Windows CPU — so it is off by default.
 
@@ -317,6 +326,7 @@ backend/ocr_engine.py      PaddleOCR adapter (lazy, optional, positioned words)
 backend/layout_parser.py   geometry-aware key/value reconstruction
 backend/document_parser.py PyMuPDF text layer, OCR fallback, per-page routing
 backend/rule_version.py    the rule engine version stamped into every saved run
+backend/submission_loader.py  the submission JSON format, shared by the CLI and the Run page
 database/                   SQLite schema and repository
 test_data/                  seed registry and the six prepared packs
 tests/                      pytest suite

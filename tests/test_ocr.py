@@ -143,6 +143,26 @@ def test_normalizes_paddleocr2_payload():
     assert words[0].confidence == pytest.approx(0.88)
 
 
+def test_reuses_ocr_result_for_the_same_raster(monkeypatch):
+    ocr_engine._ocr_cache.clear()
+    calls = []
+    raw = [[[[10, 20], [120, 20], [120, 34], [10, 34]], ("GSTIN: 07AABCA1234C1Z3", 0.88)]]
+    monkeypatch.setattr(ocr_engine, "_to_array", lambda image: image)
+
+    def run_once(_engine, _array):
+        calls.append(1)
+        return raw
+
+    monkeypatch.setattr(ocr_engine, "_run", run_once)
+
+    first = ocr_engine.recognize(b"same image", page=0, engine=object())
+    second = ocr_engine.recognize(b"same image", page=3, engine=object())
+
+    assert len(calls) == 1
+    assert first[0].page == 0
+    assert second[0].page == 3
+
+
 # --------------------------------------------------------- document parser
 
 

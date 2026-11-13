@@ -2,12 +2,58 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
+from pathlib import Path
+
 import streamlit as st
 
+from backend import submission_loader
 from database import db
 from frontend import ui
 from test_data.scenarios import SCENARIOS, SCENARIOS_BY_ID, build_documents, to_submission
 from database.models import DocumentFile, Submission
+
+DOC_TYPES = ["pdf", "txt", "png", "jpg", "jpeg", "tif", "tiff", "webp", "bmp"]
+
+
+def _documents_with_uploads(base: list[DocumentFile], uploads: dict) -> list[DocumentFile]:
+    """Files attached in the browser replace the path for their slot."""
+    by_slot = {doc.slot: doc for doc in base}
+    for slot, uploaded in uploads.items():
+        if uploaded is not None:
+            by_slot[slot] = DocumentFile(
+                slot=slot, filename=uploaded.name, content=uploaded.getvalue()
+            )
+    return [by_slot[slot] for slot in submission_loader.SLOTS if slot in by_slot]
+
+
+def _json_example() -> str:
+    return json.dumps(
+        {
+            "submission": {
+                "legal_name": "Acme Tools Pvt Ltd",
+                "country": "India",
+                "tax_id": "07AABCA1234C1ZI",
+                "registration_number": "U72900DL2015PTC123456",
+                "address": "22 Nehru Place, New Delhi, Delhi 110019",
+                "contact_name": "Rahul Sharma",
+                "contact_email": "rahul@acmetools.in",
+                "contact_phone": "9876543210",
+                "bank_holder_name": "Acme Tools Pvt Ltd",
+                "bank_name": "HDFC Bank",
+                "account_number": "50100987654321",
+                "bank_code": "HDFC0001234",
+                "bank_country": "India",
+            },
+            "documents": {
+                "incorporation": "packs/acme-incorporation.pdf",
+                "tax_certificate": "packs/acme-gst.pdf",
+                "bank_proof": "packs/acme-cheque.png",
+            },
+        },
+        indent=2,
+    )
 
 st.set_page_config(page_title="Run a submission · VendorFlow", page_icon="◆", layout="wide")
 ui.apply_theme()
@@ -27,7 +73,7 @@ if preset in ids:
     st.session_state["scenario_choice"] = preset
 source = st.radio(
     "Source",
-    ["Prepared scenario", "My own submission"],
+    ["Prepared scenario", "My own submission", "Upload a JSON"],
     horizontal=True,
     label_visibility="collapsed",
 )
@@ -72,7 +118,7 @@ if source == "Prepared scenario":
         submission = to_submission(scenario)
         documents = build_documents(scenario)
 
-else:
+elif source == "My own submission":
     defaults = SCENARIOS_BY_ID["happy_path"].submission
     with st.form("own_submission", clear_on_submit=False):
         st.markdown("**Company**")
@@ -100,13 +146,16 @@ else:
         bank_code = bank[1].text_input("IFSC / routing number", defaults["bank_code"], key="f_code")
         bank_country = bank[0].selectbox("Bank country", ["India", "United States"], index=0, key="f_bank_country")
 
-        st.markdown("**Documents** — PDF or plain text. Leave a slot empty to see the process chase it.")
+        st.markdown(
+            "**Documents** — PDF, plain text or a scan (PNG, JPG, TIFF). "
+            "Leave a slot empty to see the process chase it."
+        )
         uploads = st.columns(3)
         upload_incorporation = uploads[0].file_uploader(
-            "Incorporation certificate", type=["pdf", "txt"], key="u_inc"
+            "Incorporation certificate", type=DOC_TYPES, key="u_inc"
         )
-        upload_tax = uploads[1].file_uploader("Tax / GST certificate", type=["pdf", "txt"], key="u_tax")
-        upload_bank = uploads[2].file_uploader("Bank proof", type=["pdf", "txt"], key="u_bank")
+        upload_tax = uploads[1].file_uploader("Tax / GST certificate", type=DOC_TYPES, key="u_tax")
+        upload_bank = uploads[2].file_uploader("Bank proof", type=DOC_TYPES, key="u_bank")
 
         submitted = st.form_submit_button("Run this submission", type="primary")
 
@@ -136,10 +185,72 @@ else:
                 documents.append(
                     DocumentFile(slot=slot, filename=uploaded.name, content=uploaded.getvalue())
                 )
-        if submission.legal_name.strip() or documents:
+        if submission.legal_name.strip() or submission.tax_id.strip() or documents:
             run_now = True
         else:
             st.error("Add a company name, a tax ID, or at least one document before running.")
+
+else:
+    st.markdown("**Submission file**")
+    st.caption(
+        "Same format as `python -m backend.cli`. Document paths are read from this machine — from "
+        "where the app was started — and files attached below replace the path for their slot."
+    )
+    with st.expander("JSON format"):
+        st.code(_json_example(), language="json")
+
+    upload = st.file_uploader("Submission JSON", type=["json"], key="json-submission")
+    loaded = None
+    if upload is not None:
+        try:
+            payload = json.loads(upload.getvalue().decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            st.error(f"{upload.name} is not readable JSON ({exc.__class__.__name__}).")
+            payload = None
+        if payload is not None:
+            try:
+                loaded = submission_loader.load_payload(
+                    payload, base_dirs=[Path.cwd()], strict_paths=False
+                )
+            except submission_loader.SubmissionLoadError as exc:
+                st.error(str(exc))
+                loaded = None
+
+    if loaded is not None:
+        submission = loaded.submission
+        st.markdown('<div class="eyebrow">Loaded from the file</div>', unsafe_allow_html=True)
+        ui.scenario_submission_table(asdict(submission))
+
+        attachments = st.columns(3)
+        attached: dict[str, object] = {}
+        for column, slot in zip(attachments, submission_loader.SLOTS):
+            attached[slot] = column.file_uploader(
+                ui.SLOT_LABEL.get(slot, slot), type=DOC_TYPES, key=f"json-doc-{slot}"
+            )
+
+        on_disk = {doc.slot for doc in loaded.documents}
+        st.dataframe(
+            [
+                {
+                    "Slot": ui.SLOT_LABEL.get(slot, slot),
+                    "Path in the JSON": "found" if slot in on_disk else "not found",
+                    "Attached here": "yes" if attached.get(slot) is not None else "—",
+                }
+                for slot in submission_loader.SLOTS
+            ],
+            hide_index=True,
+        )
+        for warning in loaded.warnings:
+            st.caption(f"— {warning}")
+        if loaded.missing_paths and not any(value is not None for value in attached.values()):
+            st.warning(
+                "Those paths were not found on this machine. Attach the files above, or the run will "
+                "report the documents as missing."
+            )
+
+        run_now = st.button("Run this submission", type="primary", key="run-json")
+        if run_now:
+            documents = _documents_with_uploads(loaded.documents, attached)
 
 if run_now and submission is not None:
     st.write("")

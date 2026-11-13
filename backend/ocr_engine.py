@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import os
 import threading
+from collections import OrderedDict
 from collections.abc import Iterable
+from dataclasses import replace
+from hashlib import sha256
 
 from backend.layout_parser import TextWord
 
@@ -27,6 +30,9 @@ class OcrUnavailable(RuntimeError):
 _engine = None
 _engine_error: str | None = None
 _lock = threading.Lock()
+_cache_lock = threading.Lock()
+_ocr_cache: OrderedDict[str, tuple[TextWord, ...]] = OrderedDict()
+OCR_CACHE_SIZE = 64
 
 
 def enabled() -> bool:
@@ -67,13 +73,7 @@ def _get_engine():
             # 3.3 on Windows CPU fails its PIR lowering in the detection model.
             # Set VENDORFLOW_OCR_MKLDNN=1 to use oneDNN anyway.
             try:
-                _engine = PaddleOCR(
-                    lang=lang,
-                    use_doc_orientation_classify=False,
-                    use_doc_unwarping=False,
-                    use_textline_orientation=_flag("VENDORFLOW_OCR_ORIENTATION", False),
-                    enable_mkldnn=_flag("VENDORFLOW_OCR_MKLDNN", False),
-                )
+                _engine = PaddleOCR(**_engine_options(lang))
             except TypeError:
                 # PaddleOCR 2.x signature.
                 _engine = PaddleOCR(lang=lang, use_angle_cls=True, show_log=False)
@@ -89,13 +89,47 @@ def recognize(image: bytes, page: int = 0, engine=None) -> list[TextWord]:
     Coordinates are returned in image pixels; the caller rescales them to PDF
     points when the source was rendered from a page.
     """
+    cache_key = sha256(image).hexdigest()
+    with _cache_lock:
+        cached = _ocr_cache.get(cache_key)
+        if cached is not None:
+            _ocr_cache.move_to_end(cache_key)
+            return [replace(word, page=page) for word in cached]
+
     array = _to_array(image)
     active = engine if engine is not None else _get_engine()
     raw = _run(active, array)
-    return _normalize(raw, page)
+    words = _normalize(raw, page)
+    # Cache without a page number because an identical image may appear on a
+    # different PDF page. The cached result is re-numbered on return.
+    template = tuple(replace(word, page=0) for word in words)
+    with _cache_lock:
+        _ocr_cache[cache_key] = template
+        _ocr_cache.move_to_end(cache_key)
+        while len(_ocr_cache) > OCR_CACHE_SIZE:
+            _ocr_cache.popitem(last=False)
+    return words
 
 
 # ------------------------------------------------------------------ internals
+
+
+def _engine_options(lang: str) -> dict:
+    """Return PaddleOCR 3.x options for fast, upright business documents."""
+    options = {
+        "lang": lang,
+        "use_doc_orientation_classify": False,
+        "use_doc_unwarping": False,
+        "use_textline_orientation": _flag("VENDORFLOW_OCR_ORIENTATION", False),
+        "enable_mkldnn": _flag("VENDORFLOW_OCR_MKLDNN", False),
+    }
+    detector = os.getenv("VENDORFLOW_OCR_DETECTION_MODEL", "PP-OCRv5_mobile_det").strip()
+    recognizer = os.getenv("VENDORFLOW_OCR_RECOGNITION_MODEL", "PP-OCRv5_mobile_rec").strip()
+    if detector:
+        options["text_detection_model_name"] = detector
+    if recognizer:
+        options["text_recognition_model_name"] = recognizer
+    return options
 
 
 def _to_array(image: bytes):

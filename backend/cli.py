@@ -2,38 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import fields
 from pathlib import Path
 
 from backend.pipeline import run_pipeline
+from backend.submission_loader import SubmissionLoadError, load_json_file
 from database import db
-from database.models import DocumentFile, Submission
 from test_data.scenarios import SCENARIOS_BY_ID, build_documents, to_submission
 from test_data.seed import seed_vendors
-
-SLOTS = ("incorporation", "tax_certificate", "bank_proof")
-
-
-def submission_from_json(data: dict) -> Submission:
-    allowed = {item.name for item in fields(Submission)}
-    unknown = sorted(set(data) - allowed)
-    if unknown:
-        raise SystemExit(f"Unknown submission field(s): {', '.join(unknown)}")
-    return Submission(**{key: str(value) for key, value in data.items()})
-
-
-def documents_from_json(mapping: dict) -> list[DocumentFile]:
-    documents = []
-    for slot, raw_path in mapping.items():
-        if slot not in SLOTS:
-            raise SystemExit(f"Unknown document slot '{slot}'. Use one of {', '.join(SLOTS)}.")
-        path = Path(raw_path)
-        if not path.is_file():
-            raise SystemExit(f"Document not found: {path}")
-        documents.append(
-            DocumentFile(slot=slot, filename=path.name, content=path.read_bytes())
-        )
-    return documents
 
 
 def summarize(result, reference: str | None) -> dict:
@@ -102,7 +77,11 @@ def main(argv: list[str] | None = None) -> int:
         prog="python -m backend.cli",
         description="Run the VendorFlow decision pipeline without the UI.",
     )
-    parser.add_argument("input", nargs="?", help="JSON submission file with optional documents")
+    parser.add_argument(
+        "input",
+        nargs="?",
+        help="JSON submission file; document paths resolve from here, then from its folder",
+    )
     parser.add_argument("--demo", choices=sorted(SCENARIOS_BY_ID), help="Run a synthetic scenario")
     parser.add_argument("--save", action="store_true", help="Store the run in the local SQLite audit log")
     args = parser.parse_args(argv)
@@ -113,9 +92,12 @@ def main(argv: list[str] | None = None) -> int:
         documents = build_documents(scenario)
         scenario_id = scenario.id
     elif args.input:
-        payload = json.loads(Path(args.input).read_text(encoding="utf-8"))
-        submission = submission_from_json(payload.get("submission", payload))
-        documents = documents_from_json(payload.get("documents", {}))
+        try:
+            loaded = load_json_file(args.input)
+        except SubmissionLoadError as exc:
+            raise SystemExit(str(exc)) from exc
+        submission = loaded.submission
+        documents = loaded.documents
         scenario_id = None
     else:
         parser.error("Give a JSON file or --demo <scenario>")
