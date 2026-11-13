@@ -61,7 +61,12 @@ RESULT_TEXT = {
 # The seven stages the pipeline always runs, in order.
 STAGE_PLAN = (
     ("intake", "Submission received", "The form payload is accepted and normalised."),
-    ("documents", "Documents processed", "PDFs and text files are parsed, classified and read for labelled fields."),
+    (
+        "documents",
+        "Documents processed",
+        "PDFs and text files are parsed, classified and read for labelled fields; pages without a "
+        "text layer are OCRed and their key/value pairs recovered from layout.",
+    ),
     ("validate", "Field validation", "Format, checksum and completeness rules run on every submitted field."),
     ("cross", "Cross-document verification", "The form is compared with what the documents actually say."),
     ("duplicate", "Duplicate detection", "Tax ID, CIN and payout account are checked against the vendor registry."),
@@ -320,6 +325,7 @@ def decision_block(bundle: dict) -> None:
         esc(vendor["country"] or "country not given"),
         f'{len(bundle["documents"])} document(s)',
         f'extraction: {esc(submission["extraction_method"] or "none")}',
+        f'rules: {esc(submission.get("rule_engine_version") or "unversioned")}',
         esc(submission["created_at"]),
     ]
     if submission["duplicate_of"]:

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import random
+import sqlite3
 
 import pytest
 
+from backend import rule_version
 from backend.pipeline import run_pipeline
 from database import db
 from database.models import DocumentFile, Submission
@@ -238,6 +240,70 @@ def test_generated_runs_follow_decision_invariants():
             assert result.status == "rejected"
         elif any(f.severity == "pending" for f in findings):
             assert result.status == "pending"
+
+
+def test_every_run_is_stamped_with_the_rule_engine_version():
+    scenario = SCENARIOS_BY_ID["happy_path"]
+    result = run_pipeline(to_submission(scenario), build_documents(scenario), [])
+    assert result.rule_engine_version == rule_version.RULE_ENGINE_VERSION
+    audit = next(stage for stage in result.stages if stage.key == "audit")
+    assert f"Rule engine {rule_version.RULE_ENGINE_VERSION}" in audit.details
+
+
+def test_saved_runs_keep_the_version_they_were_evaluated_with(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "versions.db")
+    monkeypatch.setattr(db, "_READY", False)
+    db.init_db()
+
+    scenario = SCENARIOS_BY_ID["happy_path"]
+    first = run_pipeline(to_submission(scenario), build_documents(scenario), [])
+    first_id, _reference = db.save_run(first)
+    original = first.rule_engine_version
+    assert original == rule_version.RULE_ENGINE_VERSION
+
+    # Simulate a later code release changing the rules.
+    monkeypatch.setattr(rule_version, "RULE_ENGINE_VERSION", "v9.9.9")
+    second = run_pipeline(to_submission(scenario), build_documents(scenario), [])
+    second_id, _reference = db.save_run(second)
+
+    assert second.rule_engine_version == "v9.9.9"
+    assert db.get_submission(first_id)["rule_engine_version"] == original
+    assert db.get_submission_bundle(first_id)["submission"]["rule_engine_version"] == original
+    assert db.get_submission(second_id)["rule_engine_version"] == "v9.9.9"
+    processed = db.get_submission_bundle(first_id)["events"][0]["detail"]
+    assert f"rules {original}" in processed
+
+
+def test_init_db_adds_the_version_column_to_an_existing_database(tmp_path, monkeypatch):
+    path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE submissions (id INTEGER PRIMARY KEY AUTOINCREMENT, reference TEXT NOT NULL "
+        "UNIQUE, vendor_id INTEGER NOT NULL, status TEXT NOT NULL, machine_status TEXT NOT NULL, "
+        "headline TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', "
+        "extraction_method TEXT NOT NULL DEFAULT '', duplicate_of INTEGER, scenario_id TEXT, "
+        "notification_subject TEXT NOT NULL DEFAULT '', notification_body TEXT NOT NULL DEFAULT '', "
+        "created_at TEXT NOT NULL)"
+    )
+    connection.execute(
+        "INSERT INTO submissions (reference, vendor_id, status, machine_status, created_at) "
+        "VALUES ('VF-0001', 1, 'pending', 'pending', '2025-01-01 00:00:00')"
+    )
+    connection.commit()
+    connection.close()
+
+    monkeypatch.setattr(db, "DB_PATH", path)
+    monkeypatch.setattr(db, "_READY", False)
+    db.init_db()
+
+    with db.connect() as conn:
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(submissions)")}
+        legacy = conn.execute(
+            "SELECT rule_engine_version FROM submissions WHERE reference = 'VF-0001'"
+        ).fetchone()
+    assert "rule_engine_version" in columns
+    # Old records keep an empty stamp rather than being relabelled with today's rules.
+    assert legacy["rule_engine_version"] == ""
 
 
 def test_sqlite_round_trip_and_override(tmp_path, monkeypatch):

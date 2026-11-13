@@ -11,6 +11,7 @@ from backend import (
     duplicate_detector,
     field_validator,
     notification_generator,
+    rule_version,
 )
 from database.models import (
     DocumentFile,
@@ -42,6 +43,17 @@ KIND_LABEL = {
 }
 
 TOTAL_STAGES = 7
+
+# Below this mean OCR confidence the run notes the scan for a human, as a warning.
+LOW_OCR_CONFIDENCE = 0.75
+
+SOURCES = {
+    "plain_text": "plain text",
+    "text_layer": "the PDF text layer",
+    "ocr": "PaddleOCR",
+    "text_layer+ocr": "the text layer and PaddleOCR",
+    "none": "nothing",
+}
 
 ProgressCallback = Callable[[StageLog, int, int], None]
 
@@ -106,13 +118,15 @@ def run_pipeline(
             )
         )
 
+    doc_details: list[str] = []
     for doc in documents:
-        status, text = document_parser.parse_bytes(doc.filename, doc.content)
+        parsed = document_parser.parse_document(doc.filename, doc.content)
+        status, text = parsed.status, parsed.text
         document_type = "unreadable"
         fields: dict[str, str] = {}
         method = "none"
         confidence = 0.0
-        warnings: list[str] = []
+        warnings: list[str] = list(parsed.warnings)
 
         if status == "parsed":
             document_type = ai_extractor.classify_document("", text)
@@ -136,7 +150,10 @@ def run_pipeline(
                 )
                 document_type = "wrong_slot"
             else:
-                fields, method, warnings, confidence = ai_extractor.extract_fields(text)
+                fields, method, warnings, confidence = ai_extractor.extract_fields(
+                    text, layout_fields=parsed.fields()
+                )
+                warnings = list(parsed.warnings) + warnings
                 if not any((value or "").strip() for value in fields.values()):
                     document_findings.append(
                         Finding(
@@ -164,6 +181,20 @@ def run_pipeline(
                 )
             )
 
+        if parsed.ocr_pages and 0.0 < parsed.ocr_confidence < LOW_OCR_CONFIDENCE:
+            document_findings.append(
+                Finding(
+                    code="ocr_low_confidence",
+                    severity="warn",
+                    stage="documents",
+                    message=(
+                        f"{doc.filename} was scanned with PaddleOCR at mean confidence "
+                        f"{parsed.ocr_confidence:.2f}; the values read from it may need a human eye."
+                    ),
+                    vendor_message=None,
+                )
+            )
+
         parsed_docs.append(
             ParsedDocument(
                 slot=doc.slot,
@@ -178,21 +209,19 @@ def run_pipeline(
                 content=doc.content,
             )
         )
+        doc_details.append(
+            f"{doc.filename}: {status}, {document_type}, read via {SOURCES.get(parsed.source, parsed.source)},"
+            f" fields={sum(1 for value in fields.values() if value)}, confidence={confidence:.2f}"
+        )
 
     findings.extend(document_findings)
     parsed_count = sum(1 for doc in parsed_docs if doc.parse_status == "parsed")
-    unreadable_count = len(parsed_docs) - parsed_count
     field_count = sum(
         1
         for doc in parsed_docs
         for value in doc.fields.values()
         if (value or "").strip()
     )
-    doc_details = [
-        f"{doc.filename}: {doc.parse_status}, {doc.document_type}, fields={sum(1 for v in doc.fields.values() if v)}, "
-        f"confidence={doc.confidence:.2f}"
-        for doc in parsed_docs
-    ]
     doc_details.extend(f"Missing: {label}" for _slot, label in missing)
     record(
         "documents",
@@ -289,18 +318,18 @@ def run_pipeline(
         "Notification and audit log",
         [],
         f"Vendor message drafted with {len(pending_actions)} requested action(s); decision, findings and reasons packaged for the audit log.",
-        [subject],
+        [subject, f"Rule engine {rule_version.RULE_ENGINE_VERSION}"],
     )
 
-    methods = {doc.method for doc in parsed_docs if doc.method in {"rules", "model"}}
-    if methods == {"rules", "model"}:
-        extraction_method = "mixed (labels + model)"
-    elif methods == {"model"}:
-        extraction_method = "model"
-    elif methods:
-        extraction_method = "labels"
-    else:
-        extraction_method = "none"
+    methods = {doc.method for doc in parsed_docs if doc.method not in {"", "none"}}
+    sources: list[str] = []
+    if any("rules" in method for method in methods):
+        sources.append("labels")
+    if any("layout" in method for method in methods):
+        sources.append("OCR layout")
+    if any("model" in method for method in methods):
+        sources.append("model")
+    extraction_method = " + ".join(sources) or "none"
 
     return RunResult(
         status=status,
@@ -316,4 +345,5 @@ def run_pipeline(
         documents=parsed_docs,
         submission=submission,
         scenario_id=scenario_id,
+        rule_engine_version=rule_version.RULE_ENGINE_VERSION,
     )

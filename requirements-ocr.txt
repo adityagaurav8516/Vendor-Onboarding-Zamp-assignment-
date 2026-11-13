@@ -1,0 +1,5 @@
+# Optional OCR stack for scanned documents and images.
+# Base install (requirements.txt) still runs; without these, scans are reported
+# as unreadable with a warning instead of being read.
+paddlepaddle>=3.0,<4
+paddleocr>=3.3,<4

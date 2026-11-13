@@ -17,6 +17,7 @@ names are matched, and the run is persisted with its full audit trail.
 python -m venv venv
 venv/Scripts/activate          # Windows;  source venv/bin/activate on macOS/Linux
 pip install -r requirements.txt
+pip install -r requirements-ocr.txt   # optional: reads scanned PDFs and images
 streamlit run app.py
 ```
 
@@ -33,7 +34,7 @@ python -m backend.cli my_submission.json                   # your own input, see
 ```
 
 ```bash
-python -m pytest -q                                        # 45 tests
+python -m pytest -q                                        # full suite, OCR tests stubbed
 ```
 
 ---
@@ -60,7 +61,7 @@ Seven stages, always the same order. Each stage returns findings; the decision s
 | # | Stage | What it does | Why it is a separate stage |
 |---|-------|--------------|----------------------------|
 | 1 | Submission received | Accepts and normalises the form payload | Gives every run a clean, quotable starting state |
-| 2 | Documents processed | Parses PDFs/text, classifies each file against its slot, extracts labelled fields | A file in the wrong slot or an unreadable scan is a document problem, not a form problem |
+| 2 | Documents processed | Opens PDFs with PyMuPDF, reads the text layer, OCRs pages and images that have none, classifies each file against its slot, extracts labelled fields plus key/value pairs found from layout geometry | A file in the wrong slot or an unreadable scan is a document problem, not a form problem |
 | 3 | Field validation | Completeness, email/phone, GSTIN or EIN format + checksum, CIN format, IFSC/ABA checksum, account number shape | Catches typos and wrong-country formats before comparing anything |
 | 4 | Cross-document verification | Compares form values with what each document actually says; compares account holder to the legal entity; checks GST state against the address; checks country consistency | This is where subtle fraud shows up: everything plausible alone, inconsistent together |
 | 5 | Duplicate detection | Checks tax ID, CIN and payout account against the vendor registry; enforces the blocklist | Needs the outside world, so it is isolated and auditable |
@@ -88,6 +89,7 @@ the requested fix can never drift apart.
 | documents | `wrong_document` | pending | File content does not match the slot it was uploaded to |
 | documents | `unreadable_document` | pending | Could not parse (scanned image, encrypted, corrupt) |
 | documents | `extraction_unclear` | pending | File parsed but no labelled field could be read |
+| documents | `ocr_low_confidence` | warn | A scanned page was read below 0.75 mean OCR confidence, so a human should glance at it |
 | validate | `missing_fields` | pending | One or more form fields are blank |
 | validate | `bad_email` / `bad_phone` | pending | Address or number is unusable for the claimed country |
 | validate | `free_email` | warn | Gmail/Outlook contact address (common for small vendors) |
@@ -184,9 +186,11 @@ The registry and the demo packs are synthetic: `test_data/seed.py`, `test_data/s
 }
 ```
 
-Document slots are `incorporation`, `tax_certificate`, `bank_proof`. `.pdf` and `.txt` are accepted.
-Text extraction relies on the document carrying a text layer with `Label: value` lines — which is why
-the demo packs are labelled that way.
+Document slots are `incorporation`, `tax_certificate`, `bank_proof`. `.pdf`, `.txt` and the common
+image formats (`.png`, `.jpg`, `.tif`, `.webp`) are accepted.
+A PDF with a text layer is read directly, so `Label: value` lines are still picked up exactly as before.
+A scanned PDF, or a photo of a document, is rasterised and sent to PaddleOCR; the layout parser then
+rebuilds the labels and values from the positions of the recognised words (§8).
 
 ---
 
@@ -195,7 +199,46 @@ the demo packs are labelled that way.
 **Rules decide; the model reads.** Every severity and every verdict is set in Python. The optional
 model may only fill a field the labelled parser missed, and any disagreement is logged as a warning
 while the labelled value is kept. That keeps verdicts reproducible and explainable — the two things
-an auditor asks for. The cost is that genuinely messy scans need OCR, which this version does not do.
+an auditor asks for.
+
+**Rule versions are stamped, not inferred.** Every run carries the `rule_engine_version` of the
+rules that produced it (`backend/rule_version.py`, currently `v1.0.0`), and that string is written
+into the `submissions` row when the run is saved. Re-evaluating an old submission against today's
+code is therefore impossible by accident: the record says which rules judged it, and nothing
+rewrites that stamp — changing the constant only affects new runs. Reviewer overrides append events
+next to the original stamp instead of replacing it. Existing databases are migrated in place, and
+rows written before versioning keep an empty stamp rather than being relabelled. The value is shown
+on the vendor record (`rules: v1.0.0`), in the audit-log tab, in the CLI JSON and in the record
+export. Bump policy: major for a new reject rule or a severity/policy change, minor for a new
+pending or warn rule, patch for wording or thresholds that cannot change a verdict.
+
+**Scanned documents: OCR, then geometry.** A file is opened with PyMuPDF. If a page has a usable text
+layer, that text is used and nothing else runs — the demo packs and every existing document behave
+exactly as before. If a page has no usable text layer but does carry an image, the page is rendered at
+300 dpi and PaddleOCR (an open-source PP-OCR model) returns words with boxes and confidences. Images
+uploaded directly take the same path. OCR is never the only reader: the PDF text layer always wins
+where it exists, and a page that fails OCR is reported, not guessed at.
+
+The recognised words are then handed to a layout parser, because OCR of a real form gives you
+"GSTIN" and "07AABCA1234C1Z3" as two boxes on one row, not as a line. The parser clusters words into
+lines by vertical overlap, then recovers key/value pairs three ways: after a colon, from the cell gap
+in a row, or from the line under a label. Candidate labels are matched to the canonical field names
+(legal name, GSTIN/EIN, CIN, account holder, IFSC/routing, …) with a tolerant string score, and
+identifier values are de-spaced so the existing checksums keep working.
+
+PaddleOCR downloads its recognition models on first use (into `~/.paddlex`) and needs network access
+once; after that the pipeline is offline. `VENDORFLOW_OCR=off` skips OCR entirely, and
+`VENDORFLOW_OCR_MKLDNN=1` opts back into oneDNN, which paddlepaddle 3.3 fails on for its detection
+model on Windows CPU — so it is off by default.
+
+What that changes for the rule engine: nothing structural. Extracted values keep the same precedence
+— printed labels, then layout pairs, then the model — where each source may only fill a blank. OCR
+pairs below 0.6 confidence are dropped before they reach the pipeline, and a scan whose mean
+confidence is below 0.75 adds a `warn` finding for the reviewer. Confidence for OCR-read documents is
+0.8 rather than 0.95, the method is recorded per document (`layout`), and the overall extraction
+method reads "labels + OCR layout". Warnings never affect a verdict, and every reject still comes
+from a named rule. Settling on the extraction stack: `backend/ocr_engine.py` (PaddleOCR adapter),
+`backend/layout_parser.py` (geometry → key/value), `backend/document_parser.py` (PyMuPDF + routing).
 
 **Name matching, not equality.** Legal names are compared after lowercasing, removing punctuation and
 stripping company suffixes (Pvt Ltd, LLP, Inc, GmbH…), then scored with a token-sort ratio: ≥92 match,
@@ -219,12 +262,14 @@ reviewer is told which record owns the account.
 - A bank in another country, with everything else consistent, is a question for a human, not an
   automatic rejection.
 - Amounts, POs and payment terms are out of scope: PS-2 is identity, not a three-way match.
-- Documents are synthetic. A real deployment would add OCR for scans, a document-template registry,
-  and a call-out to a GST verification API.
+- Documents are synthetic. A real deployment would add a document-template registry and a call-out
+  to a GST verification API.
+- OCR reads words, not intent: a handwritten signature, a stamp or a rotated page can defeat it. That
+  is why a low-confidence scan raises a warning for a human instead of a silent approval.
 
-**Not built, on purpose:** OCR for scanned images, government tax-API lookups, e-signature on the
-vendor reply, and multi-user accounts. Each is a clear next step, none was needed to make the process
-real.
+**Not built, on purpose:** handwriting recognition, a learned document-template registry,
+government tax-API lookups, e-signature on the vendor reply, and multi-user accounts. Each is a clear
+next step, none was needed to make the process real.
 
 ---
 
@@ -252,8 +297,8 @@ two runs you record are the only ones on screen.
 - [x] Live run view (each stage as it executes) and a dashboard (history, status, outputs)
 - [x] Clear output: approved / pending / rejected, with reasons and the vendor's next message
 - [x] Five deliberately designed edge cases, prepared as runnable packs
-- [x] Audit trail: stages, findings, comparisons, documents, reviewer overrides, JSON export
-- [x] Tests: 45 passing (`python -m pytest -q`)
+- [x] Audit trail: stages, findings, comparisons, documents, reviewer overrides, rule-engine version, JSON export
+- [x] Tests: all passing (`python -m pytest -q`)
 - [ ] Deployed link — `streamlit run app.py` locally, or push this repo to Streamlit Community Cloud
       (entrypoint `app.py`, secrets: none required)
 - [ ] Five-minute demo video — script above
@@ -268,6 +313,10 @@ pages/1_Vendor_Submission.py  Run view (live stages)
 pages/2_Admin_Dashboard.py    Dashboard, edge-case self-test, registry
 pages/3_Vendor_Details.py     One record: timeline, checks, documents, audit
 backend/                    pipeline, validators, cross-verification, duplicates, decisions
+backend/ocr_engine.py      PaddleOCR adapter (lazy, optional, positioned words)
+backend/layout_parser.py   geometry-aware key/value reconstruction
+backend/document_parser.py PyMuPDF text layer, OCR fallback, per-page routing
+backend/rule_version.py    the rule engine version stamped into every saved run
 database/                   SQLite schema and repository
 test_data/                  seed registry and the six prepared packs
 tests/                      pytest suite

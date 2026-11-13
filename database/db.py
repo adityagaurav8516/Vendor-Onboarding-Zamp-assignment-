@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS submissions (
     scenario_id TEXT,
     notification_subject TEXT NOT NULL DEFAULT '',
     notification_body TEXT NOT NULL DEFAULT '',
+    rule_engine_version TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 
@@ -146,10 +147,21 @@ def init_db() -> None:
         return
     with connect() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
     from test_data.seed import ensure_seed
 
     ensure_seed()
     _READY = True
+
+
+def _migrate(conn) -> None:
+    """Bring an existing database up to the current schema without losing history."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(submissions)")}
+    if "rule_engine_version" not in columns:
+        # Runs recorded before versioning keep an empty stamp; they are never relabelled.
+        conn.execute(
+            "ALTER TABLE submissions ADD COLUMN rule_engine_version TEXT NOT NULL DEFAULT ''"
+        )
 
 
 def _row(row: sqlite3.Row | None) -> dict | None:
@@ -265,7 +277,8 @@ def save_run(result: RunResult) -> tuple[int, str]:
         cursor = conn.execute(
             "INSERT INTO submissions (reference, vendor_id, status, machine_status, headline, "
             "summary, extraction_method, duplicate_of, scenario_id, notification_subject, "
-            "notification_body, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "notification_body, rule_engine_version, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 "VF-TEMP",
                 vendor_id,
@@ -278,6 +291,7 @@ def save_run(result: RunResult) -> tuple[int, str]:
                 result.scenario_id,
                 result.notification_subject,
                 result.notification_body,
+                result.rule_engine_version,
                 now,
             ),
         )
@@ -359,7 +373,8 @@ def save_run(result: RunResult) -> tuple[int, str]:
             (
                 submission_id,
                 "submitted",
-                f"{reference} processed: {result.status}.",
+                f"{reference} processed: {result.status} "
+                f"(rules {result.rule_engine_version or 'unversioned'}).",
                 "pipeline",
                 now,
             ),
@@ -406,7 +421,7 @@ def apply_admin_decision(
 def _submission_select() -> str:
     return (
         "SELECT s.id, s.reference, s.status, s.machine_status, s.headline, s.summary, "
-        "s.extraction_method, s.duplicate_of, s.scenario_id, s.created_at, "
+        "s.extraction_method, s.duplicate_of, s.scenario_id, s.rule_engine_version, s.created_at, "
         "s.notification_subject, s.notification_body, "
         "v.legal_name, v.country, v.tax_id, v.registration_number, v.contact_email, "
         "v.bank_holder_name, v.bank_name, v.bank_country, "

@@ -51,44 +51,79 @@ def classify_document(document_type: str, text: str = "") -> str:
     return "unknown"
 
 
-def extract_fields(text: str) -> tuple[dict[str, str], str, list[str], float]:
+def extract_fields(
+    text: str,
+    layout_fields: dict[str, str] | None = None,
+) -> tuple[dict[str, str], str, list[str], float]:
+    """Read document fields. ``layout_fields`` are candidates from OCR geometry.
+
+    Precedence is labelled text, then the layout parser, then the model. Every
+    source may only fill a blank, so an OCR misread can never overwrite a value
+    the document actually printed as a label.
+    """
     rules = _rules_extract(text)
+    layout = {key: (layout_fields or {}).get(key, "") for key in _FIELD_NAMES}
     warnings: list[str] = []
     llm, llm_error = _maybe_llm(text)
     if llm_error:
         warnings.append(llm_error)
-    merged, method, merge_warnings = merge_extractions(rules, llm)
+    merged, method, merge_warnings = merge_sources(rules, layout, llm)
     warnings.extend(merge_warnings)
     filled = sum(1 for value in merged.values() if value)
-    confidence = 0.95 if method == "rules" and filled >= 3 else (0.7 if filled else 0.0)
-    if method == "model":
-        confidence = 0.6
+    confidence = 0.0
+    if filled:
+        if method == "rules":
+            confidence = 0.95 if filled >= 3 else 0.7
+        elif "layout" in method:
+            confidence = 0.8
+        else:
+            confidence = 0.6
     return merged, method, warnings, confidence
 
 
 def merge_extractions(rules: dict[str, str], llm: dict[str, str] | None) -> tuple[dict[str, str], str, list[str]]:
     """Labeled fields win. A model may only fill blanks, never overturn a label."""
-    if not llm:
-        return dict(rules), "rules", []
-    merged = {key: rules.get(key, "") for key in _FIELD_NAMES}
+    return merge_sources(rules, None, llm)
+
+
+def merge_sources(
+    rules: dict[str, str],
+    layout: dict[str, str] | None = None,
+    llm: dict[str, str] | None = None,
+) -> tuple[dict[str, str], str, list[str]]:
+    """Merge readers by trust: labels, then layout geometry, then the model."""
+    merged = {key: "" for key in _FIELD_NAMES}
+    contributors: set[str] = set()
     warnings: list[str] = []
-    filled = False
     for key in _FIELD_NAMES:
-        value = (llm.get(key) or "").strip()
-        if not value:
-            continue
-        current = (merged.get(key) or "").strip()
-        if not current:
+        value = (rules.get(key) or "").strip()
+        if value:
             merged[key] = value
-            filled = True
-        elif _same(key, current, value):
+            contributors.add("rules")
+    for name, source, label in (
+        ("layout", layout, "Layout parser"),
+        ("model", llm, "Model"),
+    ):
+        if not source:
             continue
-        else:
-            warnings.append(f"Model read {key} as '{value}'; kept the labeled value '{current}'.")
-    rules_empty = not any(rules.get(key) for key in _FIELD_NAMES)
-    if rules_empty and filled:
-        return merged, "model", warnings
-    return merged, "rules", warnings
+        for key in _FIELD_NAMES:
+            value = (source.get(key) or "").strip()
+            if not value:
+                continue
+            current = (merged.get(key) or "").strip()
+            if not current:
+                merged[key] = value
+                contributors.add(name)
+            elif _same(key, current, value):
+                continue
+            else:
+                warnings.append(
+                    f"{label} read {key} as '{value}'; kept the labeled value '{current}'."
+                )
+    if not contributors:
+        return merged, "rules", warnings
+    method = "+".join(sorted(contributors))
+    return merged, method, warnings
 
 
 def _same(key: str, left: str, right: str) -> bool:

@@ -66,6 +66,7 @@ export = {
     "machine_status": submission["machine_status"],
     "headline": submission["headline"],
     "summary": submission["summary"],
+    "rule_engine_version": submission.get("rule_engine_version", ""),
     "created_at": submission["created_at"],
     "vendor": vendor,
     "documents": [
@@ -177,7 +178,13 @@ with tab_decision:
 
 with tab_audit:
     st.write("")
-    st.markdown('<div class="eyebrow">Audit log</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="eyebrow">Audit log</div>'
+        f'<p class="note" style="margin:.3rem 0 .8rem;">This run was evaluated by '
+        f'<span class="mono">{ui.esc(submission.get("rule_engine_version") or "unversioned")}</span>. '
+        "The stamp is written once, with the record, so later rule changes never rewrite it.</p>",
+        unsafe_allow_html=True,
+    )
     for event in bundle["events"]:
         st.markdown(
             f'<div style="font-size:.85rem;padding:.35rem 0;border-bottom:1px dashed rgba(28,25,21,.12);">'

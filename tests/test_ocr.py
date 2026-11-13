@@ -1,0 +1,310 @@
+from __future__ import annotations
+
+import os
+import random
+
+import pytest
+
+from backend import document_parser, layout_parser, ocr_engine
+from backend.pipeline import run_pipeline
+from database.models import DocumentFile
+from test_data.seed import seed_vendors
+from test_data.synthetic import render_pdf
+from tests import factories
+
+REAL_OCR = os.getenv("VENDORFLOW_RUN_OCR_TESTS", "").strip().lower() in {"1", "true", "on"}
+
+
+def row(y: float, cells, confidence: float = 0.95, page: int = 0) -> list[layout_parser.TextWord]:
+    """Lay words out left to right on one visual line."""
+    words = []
+    for x, text in cells:
+        words.append(
+            layout_parser.TextWord(
+                text=text,
+                x0=float(x),
+                y0=float(y),
+                x1=float(x) + 5.5 * len(text),
+                y1=float(y) + 11.0,
+                confidence=confidence,
+                page=page,
+            )
+        )
+    return words
+
+
+def bank_scan_words(submission, confidence: float = 0.95):
+    """A scanned bank letter: no colons, values in cells, one stacked label."""
+    words: list[layout_parser.TextWord] = []
+    words += row(20, [(30, "Cancelled Cheque - Bank account proof")], confidence)
+    words += row(40, [(30, "Account"), (78, "number:"), (300, submission.account_number)], confidence)
+    words += row(58, [(30, "Account"), (78, "holder"), (300, submission.bank_holder_name)], confidence)
+    words += row(76, [(30, "Bank"), (68, "name"), (300, submission.bank_name)], confidence)
+    words += row(94, [(30, "IFSC"), (300, submission.bank_code)], confidence)
+    words += row(112, [(30, "Country"), (300, "India")], confidence)
+    return words
+
+
+def image_only_pdf(text_pdf: bytes) -> bytes:
+    """Rasterise a text PDF into a PDF that has no text layer at all."""
+    import pymupdf
+
+    with pymupdf.open(stream=text_pdf, filetype="pdf") as source:
+        png = source[0].get_pixmap(dpi=150).tobytes("png")
+    target = pymupdf.open()
+    page = target.new_page()
+    page.insert_image(page.rect, stream=png)
+    data = target.tobytes()
+    target.close()
+    return data
+
+
+# ----------------------------------------------------------------- layout
+
+
+def test_layout_parser_recovers_cells_stacked_labels_and_inline_values():
+    words = [
+        *row(10, [(30, "Northwind Supply LLC")]),
+        *row(30, [(30, "GSTIN:"), (120, "07AABCA1234C1Z3")]),
+        *row(50, [(30, "Account"), (78, "holder"), (300, "Northwind"), (390, "Supply"), (470, "LLC")]),
+        *row(70, [(30, "Account"), (78, "number:"), (300, "1234", ), (350, "5678")]),
+        *row(90, [(30, "Bank name")]),
+        *row(104, [(30, "Bank of America")]),
+        *row(126, [(30, "IFSC"), (300, "HDFC0001234")]),
+    ]
+    result = layout_parser.parse(words)
+    fields = result.fields()
+
+    assert fields["tax_id"] == "07AABCA1234C1Z3"
+    assert fields["account_holder"] == "Northwind Supply LLC"
+    assert fields["account_number"] == "12345678"
+    assert fields["bank_name"] == "Bank of America"
+    assert fields["bank_code"] == "HDFC0001234"
+    layouts = {kv.field: kv.layout for kv in result.key_values}
+    assert layouts["tax_id"] == "inline"
+    assert layouts["account_holder"] == "row"
+    assert layouts["bank_name"] == "stacked"
+
+
+def test_layout_parser_does_not_invent_pairs_from_headings():
+    words = [
+        *row(10, [(30, "Certificate of Incorporation")]),
+        *row(30, [(30, "Registrar of Companies, India")]),
+        *row(50, [(30, "This certificate is issued under the Companies Act")]),
+    ]
+    result = layout_parser.parse(words)
+    assert result.key_values == []
+
+
+def test_layout_parser_prefers_a_printed_label_over_a_misread_cell():
+    words = [
+        *row(10, [(30, "Legal name: Northwind Supply LLC")]),
+        *row(30, [(30, "Legal"), (95, "name"), (300, "Northwind Supply LLD")]),
+    ]
+    result = layout_parser.parse(words)
+    values = [kv.value for kv in result.key_values if kv.field == "legal_name"]
+    assert values == ["Northwind Supply LLC"]
+
+
+def test_plain_text_layout_pass_still_reads_labelled_lines():
+    result = layout_parser.parse_text("Legal name: Acme Tools Pvt Ltd\nCountry: India")
+    assert result.fields() == {"legal_name": "Acme Tools Pvt Ltd", "country": "India"}
+
+
+# ------------------------------------------------------------- OCR contract
+
+
+def test_normalizes_paddleocr3_payload():
+    class Result:
+        json = {
+            "rec_texts": ["Account holder: Rahul Sharma", ""],
+            "rec_scores": [0.93, 0.4],
+            "rec_polys": [
+                [[10, 20], [120, 20], [120, 34], [10, 34]],
+                [[10, 40], [30, 40], [30, 52], [10, 52]],
+            ],
+        }
+
+    words = ocr_engine._normalize([Result()], page=2)
+
+    assert [word.text for word in words] == ["Account holder: Rahul Sharma"]
+    assert words[0].confidence == pytest.approx(0.93)
+    assert (words[0].x0, words[0].y0, words[0].x1, words[0].y1) == (10, 20, 120, 34)
+    assert words[0].page == 2
+
+
+def test_normalizes_paddleocr2_payload():
+    raw = [[[[10, 20], [120, 20], [120, 34], [10, 34]], ("GSTIN: 07AABCA1234C1Z3", 0.88)]]
+
+    words = ocr_engine._normalize(raw, page=0)
+
+    assert len(words) == 1
+    assert words[0].text == "GSTIN: 07AABCA1234C1Z3"
+    assert words[0].confidence == pytest.approx(0.88)
+
+
+# --------------------------------------------------------- document parser
+
+
+def test_text_layer_pdf_is_parsed_without_touching_ocr(monkeypatch):
+    calls: list[int] = []
+
+    def never(*_args, **_kwargs):
+        calls.append(1)
+        raise AssertionError("a text-layer PDF must not be sent to OCR")
+
+    monkeypatch.setattr(ocr_engine, "recognize", never)
+    pdf = render_pdf(
+        [
+            "Cancelled Cheque - Bank account proof",
+            "Account number: 50100987654321",
+            "Account holder: ABC Technologies Pvt Ltd",
+            "Bank name: HDFC Bank",
+            "IFSC: HDFC0001234",
+            "Country: India",
+        ]
+    )
+
+    parsed = document_parser.parse_document("bank.pdf", pdf)
+
+    assert parsed.status == "parsed"
+    assert parsed.source == "text_layer"
+    assert parsed.pages == 1
+    assert parsed.ocr_pages == 0
+    assert parsed.fields()["account_holder"] == "ABC Technologies Pvt Ltd"
+    assert calls == []
+
+
+def test_scanned_pdf_is_rasterised_and_read_by_ocr(monkeypatch):
+    words = [
+        *row(20, [(30, "Cancelled Cheque - Bank account proof")]),
+        *row(40, [(30, "Account"), (78, "number:"), (300, "50100987654321")]),
+        *row(58, [(30, "Account"), (78, "holder"), (300, "ABC Technologies Pvt Ltd")]),
+    ]
+    monkeypatch.setattr(ocr_engine, "available", lambda: (True, "fake engine"))
+    monkeypatch.setattr(ocr_engine, "recognize", lambda image, page=0, engine=None: words)
+    pdf = image_only_pdf(render_pdf(["Cancelled Cheque", "Account number: 50100987654321"]))
+
+    parsed = document_parser.parse_document("scan.pdf", pdf)
+
+    assert parsed.status == "parsed"
+    assert parsed.source == "ocr"
+    assert parsed.ocr_pages == 1
+    assert parsed.ocr_confidence == pytest.approx(0.95)
+    assert parsed.fields()["account_number"] == "50100987654321"
+    assert parsed.fields()["account_holder"] == "ABC Technologies Pvt Ltd"
+
+
+def test_low_confidence_pairs_are_dropped_and_reported(monkeypatch):
+    words = [
+        *row(20, [(30, "Cancelled Cheque - Bank account proof")], confidence=0.3),
+        *row(40, [(30, "Account"), (78, "number:"), (300, "50100987654321")], confidence=0.3),
+    ]
+    monkeypatch.setattr(ocr_engine, "available", lambda: (True, "fake engine"))
+    monkeypatch.setattr(ocr_engine, "recognize", lambda image, page=0, engine=None: words)
+
+    parsed = document_parser.parse_document("scan.png", b"\x89PNG\r\n\x1a\nplaceholder")
+
+    assert parsed.key_values == []
+    assert parsed.ocr_pages == 1
+    assert parsed.ocr_confidence == pytest.approx(0.3)
+    assert any("PaddleOCR" in warning for warning in parsed.warnings)
+    assert any("low-confidence" in warning for warning in parsed.warnings)
+
+
+def test_image_without_ocr_degradates_to_unreadable(monkeypatch):
+    monkeypatch.setattr(ocr_engine, "available", lambda: (False, "paddleocr is not installed"))
+
+    parsed = document_parser.parse_document("scan.png", b"\x89PNG\r\n\x1a\nplaceholder")
+
+    assert parsed.status == "unreadable"
+    assert any("OCR" in warning for warning in parsed.warnings)
+
+
+def test_png_and_jpeg_magic_are_treated_as_scans(monkeypatch):
+    monkeypatch.setattr(ocr_engine, "available", lambda: (False, "off"))
+    for magic in (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff\xe0"):
+        parsed = document_parser.parse_document("upload.bin", magic + b"0" * 32)
+        assert parsed.source in {"none", "ocr"}
+        assert any("OCR" in warning for warning in parsed.warnings)
+
+
+# ----------------------------------------------------------- rule engine
+
+
+def _scanned_run(monkeypatch, submission, confidence: float = 0.95):
+    monkeypatch.setattr(ocr_engine, "available", lambda: (True, "fake engine"))
+    monkeypatch.setattr(
+        ocr_engine,
+        "recognize",
+        lambda image, page=0, engine=None: bank_scan_words(submission, confidence),
+    )
+    documents = [doc for doc in factories.make_documents(submission) if doc.slot != "bank_proof"]
+    documents.append(
+        DocumentFile(
+            slot="bank_proof",
+            filename="bank-scan.pdf",
+            content=image_only_pdf(render_pdf(["Cancelled Cheque - Bank account proof"])),
+        )
+    )
+    return run_pipeline(submission, documents, seed_vendors())
+
+
+def test_scanned_document_feeds_the_same_deterministic_rules(monkeypatch):
+    rng = random.Random(97)
+    submission = factories.make_vendor(rng)
+    result = _scanned_run(monkeypatch, submission)
+
+    codes = {finding.code for finding in result.findings}
+    assert result.status == "approved", codes
+    assert codes == set()
+    assert result.extraction_method == "labels + OCR layout"
+    scan = next(doc for doc in result.documents if doc.slot == "bank_proof")
+    assert "layout" in scan.method
+    assert scan.fields["account_holder"] == submission.legal_name
+    assert any("PaddleOCR" in warning for warning in scan.warnings)
+
+
+def test_ocr_holder_mismatch_is_still_decided_by_the_rule_engine(monkeypatch):
+    rng = random.Random(98)
+    submission = factories.make_vendor(rng)
+    submission.bank_holder_name = factories.person_name(rng)
+    result = _scanned_run(monkeypatch, submission)
+
+    codes = {finding.code for finding in result.findings}
+    assert "bank_holder_mismatch" in codes
+    assert result.status == "pending"
+
+
+def test_noisy_scan_adds_a_warning_but_never_blocks_an_approval(monkeypatch):
+    rng = random.Random(99)
+    submission = factories.make_vendor(rng)
+    result = _scanned_run(monkeypatch, submission, confidence=0.6)
+
+    assert result.status == "approved"
+    low = [finding for finding in result.findings if finding.code == "ocr_low_confidence"]
+    assert low and low[0].severity == "warn"
+    assert all(finding.severity == "warn" for finding in result.findings)
+
+
+@pytest.mark.skipif(
+    not REAL_OCR,
+    reason="set VENDORFLOW_RUN_OCR_TESTS=1 to run the real PaddleOCR model",
+)
+def test_real_paddleocr_reads_a_rendered_scan():
+    pdf = image_only_pdf(
+        render_pdf(
+            [
+                "Cancelled Cheque - Bank account proof",
+                "Account number: 50100987654321",
+                "Account holder: ABC Technologies Pvt Ltd",
+                "Bank name: HDFC Bank",
+            ]
+        )
+    )
+
+    parsed = document_parser.parse_document("scan.pdf", pdf)
+
+    assert parsed.status == "parsed", parsed.warnings
+    assert parsed.ocr_pages == 1
+    assert parsed.fields().get("account_number") == "50100987654321"

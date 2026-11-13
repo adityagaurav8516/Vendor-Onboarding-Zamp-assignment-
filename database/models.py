@@ -99,3 +99,4 @@ class RunResult:
     documents: list[ParsedDocument]
     submission: Submission
     scenario_id: str | None = None
+    rule_engine_version: str = ""

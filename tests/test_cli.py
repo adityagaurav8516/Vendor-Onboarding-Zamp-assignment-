@@ -16,6 +16,7 @@ def test_cli_demo_outputs_structured_json(tmp_path, monkeypatch, capsys):
     assert "missing_document" in {finding["code"] for finding in payload["findings"]}
     assert payload["required_actions"]
     assert len(payload["stages"]) == 7
+    assert payload["rule_engine_version"]
 
 
 def test_cli_reads_submission_and_document_paths(tmp_path, monkeypatch, capsys):

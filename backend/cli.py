@@ -44,6 +44,7 @@ def summarize(result, reference: str | None) -> dict:
         "headline": result.headline,
         "summary": result.summary,
         "extraction_method": result.extraction_method,
+        "rule_engine_version": result.rule_engine_version,
         "checks": [
             {
                 "field": check.field,
