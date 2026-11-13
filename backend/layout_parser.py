@@ -4,7 +4,7 @@ Turns positioned text — from a PDF text layer or from Gemini Flash — into ke
 pairs. It does not need a single ``Label: value`` line, which is exactly what a
 scanned, unformatted document does not provide. Three layouts are recognised:
 
-* ``inline``  — ``GSTIN: 07AABCA1234C1Z3``
+* ``inline``  — ``GSTIN: 07AABCA1234C1ZH``
 * ``row``     — label and value are separate cells on one row (``GSTIN    07...``)
 * ``stacked`` — the label sits above its value, left-aligned in the same column
 

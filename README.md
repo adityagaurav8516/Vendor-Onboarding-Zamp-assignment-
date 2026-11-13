@@ -1,6 +1,6 @@
 # VendorFlow — vendor onboarding, from submission to approval
 
-**Case study: PS-2 · Operations — Vendor onboarding.**
+
 A vendor submission arrives with company details, tax registration, a bank letter and an
 incorporation certificate. The process reads the documents, cross-checks them against the form and
 the existing vendor registry, and returns **approved**, **pending** or **rejected** — with every rule
@@ -33,7 +33,7 @@ python -m backend.cli my_submission.json                   # your own input, see
 ```
 
 ```bash
-python -m pytest -q                                        # full suite, OCR tests stubbed
+python -m pytest -q                                        # full suite, OCR tests stubbed (PyMuPDF, rapidfuzz, streamlit required)
 ```
 
 ---
@@ -146,7 +146,7 @@ support that claim, and a fake confidence score would be worse than saying it is
 
 - **Overview** — the process map, the decision policy, and a one-click run for every scenario.
 - **Run a submission** — pick a prepared pack, fill in a form and attach your own PDFs, text files or
-  scans, or upload a submission JSON. The run view draws each stage as it executes, then shows the
+  scans, or upload a submission JSON. The run view draws each stage as it completes (paced at ~0.3 s per stage so a viewer can follow it; the stages themselves are real), then shows the
   verdict, the field comparisons, the findings, and the drafted vendor email. The run is saved.
 - **Dashboard** — history with status filters and search, decision mix, which rules fire most, an
   edge-case self-test, the vendor registry, CSV export, and demo reset.
@@ -165,7 +165,7 @@ The registry and the demo packs are synthetic: `test_data/seed.py`, `test_data/s
   "submission": {
     "legal_name": "ABC Technologies Pvt Ltd",
     "country": "India",
-    "tax_id": "07AABCA1234C1Z3",
+    "tax_id": "07AABCA1234C1ZH",
     "registration_number": "U72900DL2015PTC123456",
     "address": "22 Nehru Place, New Delhi, Delhi 110019",
     "contact_name": "Rahul Sharma",
@@ -225,7 +225,7 @@ uploaded directly take the same path. OCR is never the only reader: the PDF text
 where it exists, and a page that fails OCR is reported, not guessed at.
 
 The recognised words are then handed to a layout parser, because OCR of a real form gives you
-"GSTIN" and "07AABCA1234C1Z3" as two boxes on one row, not as a line. The parser clusters words into
+"GSTIN" and "07AABCA1234C1ZH" as two boxes on one row, not as a line. The parser clusters words into
 lines by vertical overlap, then recovers key/value pairs three ways: after a colon, from the cell gap
 in a row, or from the line under a label. Candidate labels are matched to the canonical field names
 (legal name, GSTIN/EIN, CIN, account holder, IFSC/routing, …) with a tolerant string score, and
@@ -272,11 +272,13 @@ reviewer is told which record owns the account.
 - The submission is unauthenticated, so it can never change an approved vendor's bank details.
 - A bank in another country, with everything else consistent, is a question for a human, not an
   automatic rejection.
-- Amounts, POs and payment terms are out of scope: PS-2 is identity, not a three-way match.
+- Amounts, POs and payment terms are out of scope: vendor onboarding is identity, not a three-way match.
 - Documents are synthetic. A real deployment would add a document-template registry and a call-out
   to a GST verification API.
 - OCR reads words, not intent: a handwritten signature, a stamp or a rotated page can defeat it. That
   is why a low-confidence scan raises a warning for a human instead of a silent approval.
+
+**OCR demo caveat:** the bundled demo packs all have text layers, so they never touch OCR. Scanned uploads need `GEMINI_API_KEY`; without it they are reported as unreadable (`pending`), never guessed.
 
 **Not built, on purpose:** handwriting recognition, a learned document-template registry,
 government tax-API lookups, e-signature on the vendor reply, and multi-user accounts. Each is a clear
@@ -331,6 +333,6 @@ backend/rule_version.py    the rule engine version stamped into every saved run
 backend/submission_loader.py  the submission JSON format, shared by the CLI and the Run page
 database/                   SQLite schema and repository
 test_data/                  seed registry and the six prepared packs
-tests/                      pytest suite
+tests/                      pytest suite (incl. test_fake_vendors.py)
 frontend/                   theme and renderers
 ```

@@ -15,12 +15,7 @@ ui.apply_theme()
 ui.sidebar("record")
 db.init_db()
 
-ui.page_header(
-    "Vendor record",
-    "The whole run, inspectable",
-    "Every stage, every comparison, every rule that fired, the document text behind it, and who "
-    "changed what afterwards.",
-)
+ui.page_header("Vendor record", "The whole run, inspectable")
 
 runs = db.list_submissions()
 if not runs:
@@ -111,21 +106,11 @@ with tab_run:
             )
     else:
         placeholder.markdown(ui.timeline_html(bundle["stages"]), unsafe_allow_html=True)
-    st.caption(
-        "Stages run in a fixed order. A flag on any stage is carried forward, never dropped, and the "
-        "decision stage applies the severity ordering."
-    )
 
 # ------------------------------------------------------------------- checks
 
 with tab_checks:
     st.write("")
-    st.markdown(
-        '<p class="note">The form is compared with what the documents actually say. Name matching '
-        "ignores company suffixes and word order; identifiers are compared exactly, ignoring spaces "
-        "and dashes.</p>",
-        unsafe_allow_html=True,
-    )
     ui.checks_table(bundle["checks"])
 
 # -------------------------------------------------------------------- docs
@@ -163,13 +148,6 @@ with tab_decision:
                 "as it stands.</p></div>",
                 unsafe_allow_html=True,
             )
-        st.markdown(
-            f'<p class="note" style="margin-top:.7rem;">Extraction method: '
-            f'{ui.esc(submission["extraction_method"] or "none")}. '
-            "Rules produced the verdict; the model, when a key is configured, only fills fields the "
-            "labels missed.</p>",
-            unsafe_allow_html=True,
-        )
     st.write("")
     st.markdown('<div class="eyebrow">Reply drafted for the vendor</div>', unsafe_allow_html=True)
     ui.notification_block(bundle)
@@ -178,13 +156,6 @@ with tab_decision:
 
 with tab_audit:
     st.write("")
-    st.markdown(
-        f'<div class="eyebrow">Audit log</div>'
-        f'<p class="note" style="margin:.3rem 0 .8rem;">This run was evaluated by '
-        f'<span class="mono">{ui.esc(submission.get("rule_engine_version") or "unversioned")}</span>. '
-        "The stamp is written once, with the record, so later rule changes never rewrite it.</p>",
-        unsafe_allow_html=True,
-    )
     for event in bundle["events"]:
         st.markdown(
             f'<div style="font-size:.85rem;padding:.35rem 0;border-bottom:1px dashed rgba(28,25,21,.12);">'
@@ -194,13 +165,7 @@ with tab_audit:
         )
 
     st.write("")
-    st.markdown(
-        '<div class="card"><b>Reviewer verdict</b>'
-        '<p class="note" style="margin:.3rem 0 0;">A person can override the machine decision. The '
-        "override is appended to the audit log and updates this vendor&rsquo;s registry status, so the "
-        "next submission is checked against it.</p></div>",
-        unsafe_allow_html=True,
-    )
+    st.markdown("**Reviewer verdict**")
     with st.form("review-verdict"):
         form = st.columns([1, 1, 2])
         verdict = form[0].selectbox(

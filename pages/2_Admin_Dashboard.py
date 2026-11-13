@@ -18,12 +18,7 @@ ui.apply_theme()
 ui.sidebar("dashboard")
 db.init_db()
 
-ui.page_header(
-    "Dashboard",
-    "Every submission, and what it decided",
-    "History, current status and the output of each run — the audit trail procurement did not have "
-    "when this lived in an inbox.",
-)
+ui.page_header("Dashboard", "Every submission, and what it decided")
 
 runs = db.list_submissions()
 counts = db.dashboard_counts()
@@ -31,59 +26,14 @@ registry = db.list_registry()
 avg_ms = db.average_run_ms()
 approval = f"{counts['approved'] / counts['total'] * 100:.0f}%" if counts["total"] else "—"
 
-top = st.columns([1, 1, 1, 1, 1])
+top = st.columns(4)
 top[0].metric("Total runs", counts["total"])
 top[1].metric("Approved", counts["approved"])
 top[2].metric("Needs a reply", counts["pending"])
 top[3].metric("Rejected", counts["rejected"])
-top[4].metric("Approval rate", approval, help="Share of saved runs that ended approved.")
-
-st.write("")
-left, right = st.columns([1.4, 1])
-with left:
-    if counts["total"]:
-        bar = "".join(
-            f'<span style="width:{counts[key] / counts["total"] * 100:.2f}%;background:{colour};"></span>'
-            for key, colour in (("approved", "#0f6e56"), ("pending", "#c99a3f"), ("rejected", "#a3372c"))
-            if counts[key]
-        )
-        st.markdown(
-            f'<div class="card"><div class="eyebrow">Decision mix</div>'
-            f'<div class="bar" style="margin:.7rem 0 .5rem;height:9px;">{bar}</div>'
-            f'<div class="note">Avg pipeline time {avg_ms} ms · registry {len(registry)} vendors · '
-            f'{counts["total"]} decision(s) on record</div></div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            '<div class="card"><b>No runs yet.</b>'
-            '<p class="note" style="margin:.4rem 0 0;">Run a submission and it lands here with its '
-            "decision, findings and vendor message.</p></div>",
-            unsafe_allow_html=True,
-        )
-with right:
-    stats = db.finding_stats(5)
-    if stats:
-        rows = "".join(
-            f'<div style="display:flex;justify-content:space-between;gap:1rem;padding:.28rem 0;font-size:.85rem;">'
-            f'<span class="code">{ui.esc(item["code"])}</span>'
-            f'<span class="mono">{item["total"]}</span></div>'
-            for item in stats
-        )
-        st.markdown(
-            f'<div class="card"><div class="eyebrow">Rules firing most often</div>'
-            f'<div style="margin-top:.5rem;">{rows}</div></div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            '<div class="card"><div class="eyebrow">Rules firing most often</div>'
-            '<p class="note" style="margin:.5rem 0 0;">Nothing has fired yet.</p></div>',
-            unsafe_allow_html=True,
-        )
 
 tab_runs, tab_edges, tab_registry, tab_reset = st.tabs(
-    ["Runs", "Edge cases", "Vendor registry", "Demo data"]
+    ["Runs", "Test scenarios", "Vendors", "Reset"]
 )
 
 # --------------------------------------------------------------------- runs
@@ -125,7 +75,7 @@ with tab_runs:
             selection_mode="single-row",
             key="runs-table",
             column_config={
-                "Decision": st.column_config.TextColumn(width="small"),
+                "Decision": st.column_config.TextColumn(width="medium"),
                 "Rules fired": st.column_config.NumberColumn(width="small"),
                 "Primary reason": st.column_config.TextColumn(width="large"),
             },
@@ -153,28 +103,10 @@ with tab_runs:
             key="runs-csv",
         )
 
-    activity = db.recent_events(6)
-    if activity:
-        with st.expander("Recent audit events"):
-            for item in activity:
-                st.markdown(
-                    f'<div style="font-size:.84rem;padding:.25rem 0;">'
-                    f'<span class="code">{ui.esc(item["reference"])}</span> '
-                    f'<b>{ui.esc(item["event"])}</b> — {ui.esc(item["detail"])} '
-                    f'<span class="note">({ui.esc(item["actor"])}, {ui.esc(item["created_at"])})</span></div>',
-                    unsafe_allow_html=True,
-                )
-
 # --------------------------------------------------------------- edge cases
 
 with tab_edges:
     st.write("")
-    st.markdown(
-        '<p class="note">The prepared packs, run through the real pipeline without saving anything, '
-        "against the seed registry so run history cannot shift the expected verdict. Expected against "
-        "actual is the quickest proof the rules behave.</p>",
-        unsafe_allow_html=True,
-    )
     if st.button("Run all edge cases", type="primary", key="run-edges"):
         results = []
         for scenario in SCENARIOS:
@@ -230,12 +162,6 @@ with tab_edges:
 
 with tab_registry:
     st.write("")
-    st.markdown(
-        '<p class="note">The procurement side of the problem: vendors already known, with their '
-        "status. Duplicate detection and the blocklist read from this table; saving a reviewer "
-        "verdict writes back to it.</p>",
-        unsafe_allow_html=True,
-    )
     needle = st.text_input("Filter the registry", placeholder="Name, tax ID or CIN", key="registry-search")
     visible = [
         vendor
@@ -265,11 +191,6 @@ with tab_registry:
 
 with tab_reset:
     st.write("")
-    st.markdown(
-        '<p class="note">Empties the run history and reseeds the three vendor records the demo '
-        "scenarios depend on. Useful right before a walkthrough.</p>",
-        unsafe_allow_html=True,
-    )
     confirm = st.checkbox("I understand this deletes all saved runs", key="reset-confirm")
     if st.button("Reset demo data", disabled=not confirm, key="reset-data"):
         db.reset_demo_data()

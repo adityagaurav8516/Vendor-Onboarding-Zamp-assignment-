@@ -34,7 +34,7 @@ def _json_example() -> str:
             "submission": {
                 "legal_name": "Acme Tools Pvt Ltd",
                 "country": "India",
-                "tax_id": "07AABCA1234C1ZI",
+                "tax_id": "07AABCA1234C1ZH",
                 "registration_number": "U72900DL2015PTC123456",
                 "address": "22 Nehru Place, New Delhi, Delhi 110019",
                 "contact_name": "Rahul Sharma",
@@ -60,12 +60,7 @@ ui.apply_theme()
 ui.sidebar("run")
 db.init_db()
 
-ui.page_header(
-    "Run a submission",
-    "Feed it a vendor pack",
-    "Prepare a scenario or build your own. The pipeline runs live on this machine — documents are "
-    "parsed, checked, matched against the registry — and the finished record is saved for the dashboard.",
-)
+ui.page_header("Run a submission", "Feed it a vendor pack")
 
 ids = [scenario.id for scenario in SCENARIOS]
 preset = st.session_state.pop("preset_scenario", None)
@@ -99,15 +94,6 @@ if source == "Prepared scenario":
             f'<p style="margin-top:.6rem;">Rule codes expected: '
             f'<span class="code">{ui.esc(", ".join(scenario.expected_codes) or "none")}</span></p></div>'
             f"<div>{ui.pill(scenario.expected_status)}</div></div>",
-            unsafe_allow_html=True,
-        )
-        doc_rows = "".join(
-            f'<div style="font-size:.82rem;color:#4b4438;">· {ui.esc(ui.SLOT_LABEL.get(slot, slot))} '
-            f'— {len(lines)} labelled lines</div>'
-            for slot, lines in scenario.documents.items()
-        )
-        st.markdown(
-            f'<div class="note" style="margin-top:.8rem;">Documents in this pack<br/>{doc_rows}</div>',
             unsafe_allow_html=True,
         )
     with preview:
@@ -146,10 +132,7 @@ elif source == "My own submission":
         bank_code = bank[1].text_input("IFSC / routing number", defaults["bank_code"], key="f_code")
         bank_country = bank[0].selectbox("Bank country", ["India", "United States"], index=0, key="f_bank_country")
 
-        st.markdown(
-            "**Documents** — PDF, plain text or a scan (PNG, JPG, TIFF). "
-            "Leave a slot empty to see the process chase it."
-        )
+        st.markdown("**Documents**")
         uploads = st.columns(3)
         upload_incorporation = uploads[0].file_uploader(
             "Incorporation certificate", type=DOC_TYPES, key="u_inc"
@@ -192,10 +175,6 @@ elif source == "My own submission":
 
 else:
     st.markdown("**Submission file**")
-    st.caption(
-        "Same format as `python -m backend.cli`. Document paths are read from this machine — from "
-        "where the app was started — and files attached below replace the path for their slot."
-    )
     with st.expander("JSON format"):
         st.code(_json_example(), language="json")
 
@@ -240,8 +219,6 @@ else:
             ],
             hide_index=True,
         )
-        for warning in loaded.warnings:
-            st.caption(f"— {warning}")
         if loaded.missing_paths and not any(value is not None for value in attached.values()):
             st.warning(
                 "Those paths were not found on this machine. Attach the files above, or the run will "
@@ -267,7 +244,7 @@ if run_now and submission is not None:
     st.session_state["last_render_id"] = submission_id
     bundle = db.get_submission_bundle(submission_id)
     if bundle is not None:
-        st.success(f"Saved as {reference}. It is on the dashboard and in the audit log.")
+        st.success(f"Saved as {reference}.")
         st.write("")
         ui.decision_block(bundle)
         st.write("")
@@ -278,7 +255,7 @@ if run_now and submission is not None:
         with right:
             st.markdown('<div class="eyebrow">Field comparisons</div>', unsafe_allow_html=True)
             ui.checks_table(bundle["checks"])
-        ui.section("Reply to the vendor", "What they receive next", "Written by the process, sent by a human.")
+        ui.section("Reply", "Message to the vendor")
         ui.notification_block(bundle)
         with st.expander("Documents the process read"):
             ui.documents_block(bundle, key_prefix=f"run-{submission_id}")
