@@ -17,7 +17,6 @@ names are matched, and the run is persisted with its full audit trail.
 python -m venv venv
 venv/Scripts/activate          # Windows;  source venv/bin/activate on macOS/Linux
 pip install -r requirements.txt
-pip install -r requirements-ocr.txt   # optional: reads scanned PDFs and images
 streamlit run app.py
 ```
 
@@ -189,7 +188,7 @@ The registry and the demo packs are synthetic: `test_data/seed.py`, `test_data/s
 Document slots are `incorporation`, `tax_certificate`, `bank_proof`. `.pdf`, `.txt` and the common
 image formats (`.png`, `.jpg`, `.tif`, `.webp`) are accepted.
 A PDF with a text layer is read directly, so `Label: value` lines are still picked up exactly as before.
-A scanned PDF, or a photo of a document, is rasterised and sent to PaddleOCR; the layout parser then
+A scanned PDF, or a photo of a document, is rasterised and sent to Gemini Flash; the layout parser then
 rebuilds the labels and values from the positions of the recognised words (§8).
 
 The same JSON can be uploaded from **Run a submission → Upload a JSON**. Paths resolve from the
@@ -221,7 +220,7 @@ pending or warn rule, patch for wording or thresholds that cannot change a verdi
 **Scanned documents: OCR, then geometry.** A file is opened with PyMuPDF. If a page has a usable text
 layer, that text is used and nothing else runs — the demo packs and every existing document behave
 exactly as before. If a page has no usable text layer but does carry an image, the page is rendered at
-200 dpi and PaddleOCR's mobile models return words with boxes and confidences. Images
+200 dpi and Gemini Flash returns a transcription plus supported vendor fields. Images
 uploaded directly take the same path. OCR is never the only reader: the PDF text layer always wins
 where it exists, and a page that fails OCR is reported, not guessed at.
 
@@ -232,13 +231,16 @@ in a row, or from the line under a label. Candidate labels are matched to the ca
 (legal name, GSTIN/EIN, CIN, account holder, IFSC/routing, …) with a tolerant string score, and
 identifier values are de-spaced so the existing checksums keep working.
 
-PaddleOCR downloads its recognition models on first use (into `~/.paddlex`) and needs network access
-once; after that the pipeline is offline. The fast defaults are 200 dpi plus the PP-OCRv5 mobile
-detector and recognizer; set `VENDORFLOW_OCR_DPI=300` for tiny or degraded text, or override either
-model with `VENDORFLOW_OCR_DETECTION_MODEL` and `VENDORFLOW_OCR_RECOGNITION_MODEL`. Repeated page
-images are cached for the lifetime of the app process. `VENDORFLOW_OCR=off` skips OCR entirely, and
-`VENDORFLOW_OCR_MKLDNN=1` opts back into oneDNN, which paddlepaddle 3.3 fails on for its detection
-model on Windows CPU — so it is off by default.
+Gemini Flash is a hosted service, so scans need a `GEMINI_API_KEY` and outbound network access. The
+default model is `gemini-3.5-flash`; override it with `GEMINI_MODEL` if your Google project has a
+different enabled Flash model. The
+fast default is 200 dpi; set `VENDORFLOW_OCR_DPI=300` for tiny or degraded text. Repeated page images
+are cached for the lifetime of the app process. `VENDORFLOW_OCR=off` skips OCR entirely.
+
+**Hosted OCR.** Set `GEMINI_API_KEY` to read scanned pages. Gemini Flash returns a transcription and
+only the vendor fields visibly supported by the page; the same local layout parser and deterministic
+rules run unchanged. If the service is unavailable, the document is reported as unreadable rather than
+being guessed at. Do not enable this for real vendor documents until its data-handling terms are approved.
 
 What that changes for the rule engine: nothing structural. Extracted values keep the same precedence
 — printed labels, then layout pairs, then the model — where each source may only fill a blank. OCR
@@ -246,7 +248,7 @@ pairs below 0.6 confidence are dropped before they reach the pipeline, and a sca
 confidence is below 0.75 adds a `warn` finding for the reviewer. Confidence for OCR-read documents is
 0.8 rather than 0.95, the method is recorded per document (`layout`), and the overall extraction
 method reads "labels + OCR layout". Warnings never affect a verdict, and every reject still comes
-from a named rule. Settling on the extraction stack: `backend/ocr_engine.py` (PaddleOCR adapter),
+from a named rule. Settling on the extraction stack: `backend/ocr_engine.py` (Gemini Flash adapter),
 `backend/layout_parser.py` (geometry → key/value), `backend/document_parser.py` (PyMuPDF + routing).
 
 **Name matching, not equality.** Legal names are compared after lowercasing, removing punctuation and
@@ -322,7 +324,7 @@ pages/1_Vendor_Submission.py  Run view (live stages)
 pages/2_Admin_Dashboard.py    Dashboard, edge-case self-test, registry
 pages/3_Vendor_Details.py     One record: timeline, checks, documents, audit
 backend/                    pipeline, validators, cross-verification, duplicates, decisions
-backend/ocr_engine.py      PaddleOCR adapter (lazy, optional, positioned words)
+backend/ocr_engine.py      Gemini Flash adapter (optional, transcription + positioned fields)
 backend/layout_parser.py   geometry-aware key/value reconstruction
 backend/document_parser.py PyMuPDF text layer, OCR fallback, per-page routing
 backend/rule_version.py    the rule engine version stamped into every saved run

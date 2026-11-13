@@ -1,6 +1,6 @@
 """Geometry-aware layout parser.
 
-Turns positioned text — from a PDF text layer or from PaddleOCR — into key/value
+Turns positioned text — from a PDF text layer or from Gemini Flash — into key/value
 pairs. It does not need a single ``Label: value`` line, which is exactly what a
 scanned, unformatted document does not provide. Three layouts are recognised:
 

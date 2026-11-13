@@ -50,8 +50,8 @@ LOW_OCR_CONFIDENCE = 0.75
 SOURCES = {
     "plain_text": "plain text",
     "text_layer": "the PDF text layer",
-    "ocr": "PaddleOCR",
-    "text_layer+ocr": "the text layer and PaddleOCR",
+    "ocr": "Gemini Flash",
+    "text_layer+ocr": "the text layer and Gemini Flash",
     "none": "nothing",
 }
 
@@ -188,7 +188,7 @@ def run_pipeline(
                     severity="warn",
                     stage="documents",
                     message=(
-                        f"{doc.filename} was scanned with PaddleOCR at mean confidence "
+                        f"{doc.filename} was scanned with Gemini Flash at mean confidence "
                         f"{parsed.ocr_confidence:.2f}; the values read from it may need a human eye."
                     ),
                     vendor_message=None,

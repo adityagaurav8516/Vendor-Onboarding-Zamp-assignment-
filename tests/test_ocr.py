@@ -114,46 +114,56 @@ def test_plain_text_layout_pass_still_reads_labelled_lines():
 # ------------------------------------------------------------- OCR contract
 
 
-def test_normalizes_paddleocr3_payload():
-    class Result:
-        json = {
-            "rec_texts": ["Account holder: Rahul Sharma", ""],
-            "rec_scores": [0.93, 0.4],
-            "rec_polys": [
-                [[10, 20], [120, 20], [120, 34], [10, 34]],
-                [[10, 40], [30, 40], [30, 52], [10, 52]],
-            ],
-        }
+def test_normalizes_gemini_transcription_and_fields():
+    payload = {
+        "candidates": [{"content": {"parts": [{"text": '{"text":"Registration certificate","fields":{"tax_id":"07AABCA1234C1Z3"}}'}]}}]
+    }
 
-    words = ocr_engine._normalize([Result()], page=2)
+    words = ocr_engine._normalize_gemini(payload, page=2)
 
-    assert [word.text for word in words] == ["Account holder: Rahul Sharma"]
-    assert words[0].confidence == pytest.approx(0.93)
-    assert (words[0].x0, words[0].y0, words[0].x1, words[0].y1) == (10, 20, 120, 34)
+    assert [word.text for word in words] == ["Registration certificate", "GSTIN: 07AABCA1234C1Z3"]
     assert words[0].page == 2
+    assert words[1].y0 == 20
 
 
-def test_normalizes_paddleocr2_payload():
-    raw = [[[[10, 20], [120, 20], [120, 34], [10, 34]], ("GSTIN: 07AABCA1234C1Z3", 0.88)]]
+def test_detects_gemini_image_mime_types():
+    assert ocr_engine._image_mime(b"\xff\xd8\xffdata") == "image/jpeg"
+    assert ocr_engine._image_mime(b"RIFF0000WEBPdata") == "image/webp"
+    assert ocr_engine._image_mime(b"GIF89adata") == "image/gif"
+    assert ocr_engine._image_mime(b"\x89PNG\r\n\x1a\n") == "image/png"
 
-    words = ocr_engine._normalize(raw, page=0)
 
-    assert len(words) == 1
-    assert words[0].text == "GSTIN: 07AABCA1234C1Z3"
-    assert words[0].confidence == pytest.approx(0.88)
+def test_extracts_a_gemini_http_error_message():
+    class Error:
+        def read(self):
+            return b'{"error":{"message":"model is unavailable"}}'
+
+    assert ocr_engine._http_error_message(Error()) == "model is unavailable"
+
+
+def test_uses_gemini_transcription_when_fields_are_empty():
+    payload = {"candidates": [{"content": {"parts": [{"text": '{"text":"GSTIN: 07AABCA1234C1Z3\\nLegal name: Acme Tools Pvt Ltd","fields":{}}'}]}}]}
+
+    words = ocr_engine._normalize_gemini(payload, page=0)
+    fields = layout_parser.parse(words).fields()
+
+    assert [word.text for word in words] == [
+        "GSTIN: 07AABCA1234C1Z3",
+        "Legal name: Acme Tools Pvt Ltd",
+    ]
+    assert fields["tax_id"] == "07AABCA1234C1Z3"
+    assert fields["legal_name"] == "Acme Tools Pvt Ltd"
 
 
 def test_reuses_ocr_result_for_the_same_raster(monkeypatch):
     ocr_engine._ocr_cache.clear()
     calls = []
-    raw = [[[[10, 20], [120, 20], [120, 34], [10, 34]], ("GSTIN: 07AABCA1234C1Z3", 0.88)]]
-    monkeypatch.setattr(ocr_engine, "_to_array", lambda image: image)
 
-    def run_once(_engine, _array):
+    def run_once(_image, page):
         calls.append(1)
-        return raw
+        return [layout_parser.TextWord("GSTIN: 07AABCA1234C1Z3", 10, 20, 120, 34, 0.85, page)]
 
-    monkeypatch.setattr(ocr_engine, "_run", run_once)
+    monkeypatch.setattr(ocr_engine, "_recognize_gemini", run_once)
 
     first = ocr_engine.recognize(b"same image", page=0, engine=object())
     second = ocr_engine.recognize(b"same image", page=3, engine=object())
@@ -228,12 +238,12 @@ def test_low_confidence_pairs_are_dropped_and_reported(monkeypatch):
     assert parsed.key_values == []
     assert parsed.ocr_pages == 1
     assert parsed.ocr_confidence == pytest.approx(0.3)
-    assert any("PaddleOCR" in warning for warning in parsed.warnings)
+    assert any("Gemini Flash" in warning for warning in parsed.warnings)
     assert any("low-confidence" in warning for warning in parsed.warnings)
 
 
 def test_image_without_ocr_degradates_to_unreadable(monkeypatch):
-    monkeypatch.setattr(ocr_engine, "available", lambda: (False, "paddleocr is not installed"))
+    monkeypatch.setattr(ocr_engine, "available", lambda: (False, "GEMINI_API_KEY is not set"))
 
     parsed = document_parser.parse_document("scan.png", b"\x89PNG\r\n\x1a\nplaceholder")
 
@@ -282,7 +292,7 @@ def test_scanned_document_feeds_the_same_deterministic_rules(monkeypatch):
     scan = next(doc for doc in result.documents if doc.slot == "bank_proof")
     assert "layout" in scan.method
     assert scan.fields["account_holder"] == submission.legal_name
-    assert any("PaddleOCR" in warning for warning in scan.warnings)
+    assert any("Gemini Flash" in warning for warning in scan.warnings)
 
 
 def test_ocr_holder_mismatch_is_still_decided_by_the_rule_engine(monkeypatch):
@@ -309,9 +319,9 @@ def test_noisy_scan_adds_a_warning_but_never_blocks_an_approval(monkeypatch):
 
 @pytest.mark.skipif(
     not REAL_OCR,
-    reason="set VENDORFLOW_RUN_OCR_TESTS=1 to run the real PaddleOCR model",
+    reason="set VENDORFLOW_RUN_OCR_TESTS=1 and GEMINI_API_KEY to run live Gemini Flash",
 )
-def test_real_paddleocr_reads_a_rendered_scan():
+def test_real_gemini_flash_reads_a_rendered_scan():
     pdf = image_only_pdf(
         render_pdf(
             [

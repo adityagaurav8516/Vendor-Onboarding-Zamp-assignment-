@@ -1,7 +1,7 @@
 """Document intake: text layer first, OCR only where it is needed.
 
 PyMuPDF opens the PDF, returns the embedded text layer and its word geometry, and
-rasterises the pages that have no usable text layer. PaddleOCR reads those
+rasterises the pages that have no usable text layer. Gemini Flash reads those
 pixels, ``layout_parser`` rebuilds labels and values from the boxes, and the
 pipeline still receives plain text plus a few candidate fields. It never
 receives a verdict.
@@ -218,7 +218,7 @@ def _finish(
     warnings: list[str] = []
     if ocr_pages:
         warnings.append(
-            f"Read {ocr_pages} page(s) with PaddleOCR (mean confidence {ocr_confidence:.2f}); "
+            f"Read {ocr_pages} page(s) with Gemini Flash (mean confidence {ocr_confidence:.2f}); "
             f"the layout parser recovered {len(kept)} key/value pair(s)."
         )
     if dropped:
