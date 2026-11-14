@@ -149,19 +149,78 @@ def _clean_ocr_field(field: str, val) -> str:
             cand = num_m.group(1).strip()
             if len(cand) < len(cleaned):
                 cleaned = cand
+    elif field == "tax_id":
+        gstin_m = re.search(r"(\d{2}[A-Za-z]{5}\d{4}[A-Za-z][A-Za-z0-9]Z[A-Za-z0-9])", cleaned)
+        if gstin_m:
+            return gstin_m.group(1).upper()
+        ein_m = re.search(r"(\d{2}-\d{7})", cleaned)
+        if ein_m:
+            return ein_m.group(1)
+        pan_m = re.search(r"([A-Za-z]{5}\d{4}[A-Za-z])", cleaned)
+        if pan_m:
+            return pan_m.group(1).upper()
+    elif field in ("legal_name", "account_holder"):
+        norm = cleaned.replace("\\n", "\n")
+        first_line = [l.strip() for l in norm.splitlines() if l.strip()]
+        if first_line:
+            cleaned = first_line[0]
+        split_m = re.search(
+            r"\b(?:\d+[\.\)]\s*)?(?:trade\s+name|constitution|address|date\s+of\s+issue|jurisdiction)\b",
+            cleaned,
+            re.IGNORECASE,
+        )
+        if split_m and split_m.start() > 0:
+            cleaned = cleaned[: split_m.start()].strip(" .,;:-—=·/|")
+    elif field == "registration_number":
+        cin_m = re.search(r"\b([A-Za-z]\d{5}[A-Za-z]{2}\d{4}[A-Za-z]{3}\d{6})\b", cleaned)
+        if cin_m:
+            return cin_m.group(1).upper()
     return cleaned
+
+
+def _parse_gemini_json(text: str) -> dict | None:
+    if not text:
+        return None
+    raw = text.strip()
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    import re
+    cleaned = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    try:
+        data = json.loads(cleaned)
+        if isinstance(data, dict):
+            return data
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if match:
+        try:
+            data = json.loads(match.group(0))
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    return None
 
 
 def _normalize_gemini(payload, page: int) -> list[TextWord]:
     response_text = _gemini_text(payload)
     if not response_text:
         return []
-    try:
-        extracted = json.loads(response_text)
-    except json.JSONDecodeError:
-        return _lines(response_text, page)
-    if not isinstance(extracted, dict):
-        return []
+    extracted = _parse_gemini_json(response_text)
+    if extracted is None:
+        import re
+        plain = re.sub(r"^```(?:json)?\s*", "", response_text.strip(), flags=re.IGNORECASE)
+        plain = re.sub(r"\s*```$", "", plain).strip()
+        return _lines(plain, page)
     lines = _lines(str(extracted.get("text") or ""), page)
     fields = extracted.get("fields") or {}
     if isinstance(fields, dict):

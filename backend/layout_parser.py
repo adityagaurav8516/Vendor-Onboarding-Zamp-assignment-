@@ -455,6 +455,28 @@ def _clean_value(value: str, field_name: str) -> str:
             candidate = num_match.group(1).strip()
             if len(candidate) < len(cleaned):
                 cleaned = candidate
+    if field_name == "tax_id":
+        gstin_m = re.search(r"(\d{2}[A-Za-z]{5}\d{4}[A-Za-z][A-Za-z0-9]Z[A-Za-z0-9])", cleaned)
+        if gstin_m:
+            return gstin_m.group(1).upper()
+        ein_m = re.search(r"(\d{2}-\d{7})", cleaned)
+        if ein_m:
+            return ein_m.group(1)
+        pan_m = re.search(r"([A-Za-z]{5}\d{4}[A-Za-z])", cleaned)
+        if pan_m:
+            return pan_m.group(1).upper()
+    if field_name in ("legal_name", "account_holder"):
+        norm = cleaned.replace("\\n", "\n")
+        first_line = [l.strip() for l in norm.splitlines() if l.strip()]
+        if first_line:
+            cleaned = first_line[0]
+        split_match = re.search(
+            r"\b(?:\d+[\.\)]\s*)?(?:trade\s+name|constitution|address|date\s+of\s+issue|jurisdiction)\b",
+            cleaned,
+            re.IGNORECASE,
+        )
+        if split_match and split_match.start() > 0:
+            cleaned = cleaned[: split_match.start()].strip(" .,;:-—=·/|")
     if field_name in _ID_FIELDS:
         compact = re.sub(r"\s+", "", cleaned)
         if re.fullmatch(r"[A-Za-z0-9/\-]{5,}", compact):

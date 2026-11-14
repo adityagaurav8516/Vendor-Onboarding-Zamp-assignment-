@@ -163,19 +163,43 @@ def _clean_rule_value(value: str, key: str) -> str:
         compact = re.sub(r"\s+", "", cleaned)
         if re.fullmatch(r"[A-Za-z0-9/\-]{5,}", compact):
             cleaned = compact
+    if key == "tax_id":
+        gstin_m = re.search(r"(\d{2}[A-Za-z]{5}\d{4}[A-Za-z][A-Za-z0-9]Z[A-Za-z0-9])", cleaned)
+        if gstin_m:
+            return gstin_m.group(1).upper()
+        ein_m = re.search(r"(\d{2}-\d{7})", cleaned)
+        if ein_m:
+            return ein_m.group(1)
+        pan_m = re.search(r"([A-Za-z]{5}\d{4}[A-Za-z])", cleaned)
+        if pan_m:
+            return pan_m.group(1).upper()
+    if key in ("legal_name", "account_holder"):
+        norm = cleaned.replace("\\n", "\n")
+        first_line = [l.strip() for l in norm.splitlines() if l.strip()]
+        if first_line:
+            cleaned = first_line[0]
+        split_match = re.search(
+            r"\b(?:\d+[\.\)]\s*)?(?:trade\s+name|constitution|address|date\s+of\s+issue|jurisdiction)\b",
+            cleaned,
+            re.IGNORECASE,
+        )
+        if split_match and split_match.start() > 0:
+            cleaned = cleaned[: split_match.start()].strip(" .,;:-—=·/|")
     return cleaned
 
 
 def _rules_extract(text: str) -> dict[str, str]:
     fields = {key: "" for key in _FIELD_NAMES}
-    for raw_line in (text or "").splitlines():
+    normalized_text = (text or "").replace("\\n", "\n")
+    for raw_line in normalized_text.splitlines():
         line = " ".join(raw_line.split())
         if not line:
             continue
         matches = []
         for m in _INLINE_PATTERN.finditer(line):
             lbl = m.group(1).strip().lower()
-            key = _KEY_MAP.get(lbl)
+            lbl_clean = re.sub(r"^\d+[\.\)]\s*", "", lbl)
+            key = _KEY_MAP.get(lbl_clean) or _KEY_MAP.get(lbl)
             if key:
                 matches.append((m.start(1), m.end(), key))
         if matches:
@@ -189,16 +213,18 @@ def _rules_extract(text: str) -> dict[str, str]:
                     fields[key] = val
         elif ":" in line:
             label, value = line.split(":", 1)
-            key = _KEY_MAP.get(label.strip().lower())
+            lbl = label.strip().lower()
+            lbl_clean = re.sub(r"^\d+[\.\)]\s*", "", lbl)
+            key = _KEY_MAP.get(lbl_clean) or _KEY_MAP.get(lbl)
             if key and value.strip() and not fields[key]:
                 fields[key] = _clean_rule_value(value.strip(), key)
-    upper = (text or "").upper()
+    upper = normalized_text.upper()
     if not fields["tax_id"]:
         match = re.search(r"\b\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]\b", upper)
         if match:
             fields["tax_id"] = match.group(0)
         else:
-            match = re.search(r"\b\d{2}-\d{7}\b", text or "")
+            match = re.search(r"\b\d{2}-\d{7}\b", normalized_text)
             if match:
                 fields["tax_id"] = match.group(0)
     if fields["tax_id"]:
@@ -257,11 +283,17 @@ def _maybe_llm(text: str) -> tuple[dict[str, str] | None, str | None]:
 
 
 def _parse_model_json(content: str) -> dict[str, str] | None:
-    match = re.search(r"\{.*\}", content, re.DOTALL)
-    if not match:
+    if not content:
         return None
+    raw = content.strip()
+    cleaned = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    target = match.group(0) if match else cleaned
     try:
-        raw = json.loads(match.group(0))
+        raw_dict = json.loads(target)
     except json.JSONDecodeError:
         return None
-    return {key: str(raw.get(key) or "").strip() for key in _FIELD_NAMES}
+    if not isinstance(raw_dict, dict):
+        return None
+    return {key: str(raw_dict.get(key) or "").strip() for key in _FIELD_NAMES}

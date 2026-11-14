@@ -380,3 +380,48 @@ def test_compare_bank_tokens_handles_trailing_label_without_mismatch():
     )
     assert not any(f.code == "account_number_mismatch" for f in findings)
     assert checks[0].result == "match"
+
+
+def test_normalizes_gemini_markdown_code_fences():
+    payload = {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {
+                            "text": (
+                                "```json\n"
+                                "{\n"
+                                '  "text": "Registration Number: 29AABCZ9876K1Z9\\n\\n1. Legal Name: Zenith Cloud Solutions Private Limited",\n'
+                                '  "fields": {\n'
+                                '    "legal_name": "Zenith Cloud Solutions Private Limited",\n'
+                                '    "tax_id": "29AABCZ9876K1Z9",\n'
+                                '    "registration_number": "29AABCZ9876K1Z9"\n'
+                                "  }\n"
+                                "}\n"
+                                "```"
+                            )
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+    words = ocr_engine._normalize_gemini(payload, page=0)
+    layout = layout_parser.parse(words)
+    fields = layout.fields()
+    assert fields["legal_name"] == "Zenith Cloud Solutions Private Limited"
+    assert fields["tax_id"] == "29AABCZ9876K1Z9"
+
+
+def test_clean_ocr_field_and_layout_parser_clean_gstin_and_legal_name():
+    cleaned_tax = ocr_engine._clean_ocr_field("tax_id", "29AABCZ9876K1Z9\\n\\n2")
+    assert cleaned_tax == "29AABCZ9876K1Z9"
+
+    raw_name = (
+        'Zenith Cloud Solutions Private Limited\\n\\n3. Trade Name: Zenith Cloud\\n\\n'
+        '","fields":{"legal_name":"Zenith Cloud Solutions Private Limited"}'
+    )
+    cleaned_name = ocr_engine._clean_ocr_field("legal_name", raw_name)
+    assert cleaned_name == "Zenith Cloud Solutions Private Limited"
+
