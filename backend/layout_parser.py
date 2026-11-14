@@ -436,7 +436,7 @@ def _normalise_label(text: str) -> str:
 
 
 def _clean_value(value: str, field_name: str) -> str:
-    cleaned = " ".join((value or "").split()).strip(" .,;:-—=·/|")
+    cleaned = " ".join((value or "").split()).strip(" .,;:-—=·/|\"'`")
     if not cleaned:
         return ""
     if field_name == "account_number":
@@ -446,7 +446,7 @@ def _clean_value(value: str, field_name: str) -> str:
             re.IGNORECASE,
         )
         if split_match and split_match.start() > 0:
-            cleaned = cleaned[: split_match.start()].strip(" .,;:-—=·/|")
+            cleaned = cleaned[: split_match.start()].strip(" .,;:-—=·/|\"'`")
         num_match = re.match(
             r"^([A-Z]{2}\d{2}[A-Za-z0-9]{10,30}|\d[\d\s\-]{4,24}\d|\d{5,24})\b",
             cleaned,
@@ -467,7 +467,7 @@ def _clean_value(value: str, field_name: str) -> str:
             return pan_m.group(1).upper()
     if field_name in ("legal_name", "account_holder"):
         norm = cleaned.replace("\\n", "\n")
-        first_line = [l.strip() for l in norm.splitlines() if l.strip()]
+        first_line = [l.strip(" .,;:-—=·/|\"'`") for l in norm.splitlines() if l.strip(" .,;:-—=·/|\"'`")]
         if first_line:
             cleaned = first_line[0]
         split_match = re.search(
@@ -476,12 +476,12 @@ def _clean_value(value: str, field_name: str) -> str:
             re.IGNORECASE,
         )
         if split_match and split_match.start() > 0:
-            cleaned = cleaned[: split_match.start()].strip(" .,;:-—=·/|")
+            cleaned = cleaned[: split_match.start()].strip(" .,;:-—=·/|\"'`")
     if field_name in _ID_FIELDS:
         compact = re.sub(r"\s+", "", cleaned)
         if re.fullmatch(r"[A-Za-z0-9/\-]{5,}", compact):
             cleaned = compact.upper() if field_name != "account_number" else compact
-    return cleaned
+    return cleaned.strip(" .,;:-—=·/|\"'`")
 
 
 def _value_ok(value: str, field_name: str) -> bool:

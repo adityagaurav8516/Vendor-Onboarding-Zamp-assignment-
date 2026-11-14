@@ -37,6 +37,35 @@ FIELD_LABELS = {
 }
 
 
+def _api_key() -> str:
+    key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not key:
+        try:
+            from pathlib import Path
+            from dotenv import load_dotenv
+            root_env = Path(__file__).resolve().parent.parent / ".env"
+            if root_env.exists():
+                load_dotenv(root_env, override=False)
+            else:
+                load_dotenv(override=False)
+            key = os.getenv("GEMINI_API_KEY", "").strip()
+        except Exception:
+            pass
+    if not key:
+        try:
+            import streamlit as st
+            key = str(st.secrets.get("GEMINI_API_KEY") or "").strip()
+        except Exception:
+            pass
+    return key
+
+
+def clear_cache() -> None:
+    """Clear in-memory OCR cache so subsequent runs hit Gemini Flash directly."""
+    with _cache_lock:
+        _ocr_cache.clear()
+
+
 class OcrUnavailable(RuntimeError):
     """Raised when Gemini extraction is disabled, unconfigured, or unavailable."""
 
@@ -53,7 +82,7 @@ def available() -> tuple[bool, str]:
     """Cheap readiness probe. Does not make a network request."""
     if not enabled():
         return False, "OCR is switched off with VENDORFLOW_OCR"
-    if not os.getenv("GEMINI_API_KEY", "").strip():
+    if not _api_key():
         return False, "GEMINI_API_KEY is not set"
     return True, "Gemini Flash ready"
 
@@ -61,12 +90,14 @@ def available() -> tuple[bool, str]:
 def recognize(image: bytes, page: int = 0, engine=None) -> list[TextWord]:
     """Send one rendered page to Gemini Flash and return parser-compatible lines."""
     del engine
+    no_cache = os.getenv("VENDORFLOW_OCR_NO_CACHE", "0").strip().lower() in {"1", "true", "yes", "on"}
     cache_key = sha256(image).hexdigest()
-    with _cache_lock:
-        cached = _ocr_cache.get(cache_key)
-        if cached is not None:
-            _ocr_cache.move_to_end(cache_key)
-            return [replace(word, page=page) for word in cached]
+    if not no_cache:
+        with _cache_lock:
+            cached = _ocr_cache.get(cache_key)
+            if cached is not None:
+                _ocr_cache.move_to_end(cache_key)
+                return [replace(word, page=page) for word in cached]
 
     words = _recognize_gemini(image, page)
     template = tuple(replace(word, page=0) for word in words)
@@ -79,7 +110,7 @@ def recognize(image: bytes, page: int = 0, engine=None) -> list[TextWord]:
 
 
 def _recognize_gemini(image: bytes, page: int) -> list[TextWord]:
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    api_key = _api_key()
     if not api_key:
         raise OcrUnavailable("GEMINI_API_KEY is not set")
     model = os.getenv("GEMINI_MODEL", "gemini-3.5-flash").strip() or "gemini-3.5-flash"
@@ -137,13 +168,13 @@ def _image_mime(image: bytes) -> str:
 
 def _clean_ocr_field(field: str, val) -> str:
     import re
-    cleaned = str(val or "").strip()
+    cleaned = str(val or "").strip(" .,;:-—=·/|\"'`")
     if not cleaned:
         return ""
     if field == "account_number":
         split_m = re.search(r"\b(?:bank\s+name|bank|ifsc|branch|account\s+holder|a/c)\b", cleaned, re.IGNORECASE)
         if split_m and split_m.start() > 0:
-            cleaned = cleaned[: split_m.start()].strip(" .,;:-—=·/|")
+            cleaned = cleaned[: split_m.start()].strip(" .,;:-—=·/|\"'`")
         num_m = re.match(r"^([A-Z]{2}\d{2}[A-Za-z0-9]{10,30}|\d[\d\s\-]{4,24}\d|\d{5,24})\b", cleaned)
         if num_m:
             cand = num_m.group(1).strip()
@@ -161,7 +192,7 @@ def _clean_ocr_field(field: str, val) -> str:
             return pan_m.group(1).upper()
     elif field in ("legal_name", "account_holder"):
         norm = cleaned.replace("\\n", "\n")
-        first_line = [l.strip() for l in norm.splitlines() if l.strip()]
+        first_line = [l.strip(" .,;:-—=·/|\"'`") for l in norm.splitlines() if l.strip(" .,;:-—=·/|\"'`")]
         if first_line:
             cleaned = first_line[0]
         split_m = re.search(
@@ -170,12 +201,12 @@ def _clean_ocr_field(field: str, val) -> str:
             re.IGNORECASE,
         )
         if split_m and split_m.start() > 0:
-            cleaned = cleaned[: split_m.start()].strip(" .,;:-—=·/|")
+            cleaned = cleaned[: split_m.start()].strip(" .,;:-—=·/|\"'`")
     elif field == "registration_number":
         cin_m = re.search(r"\b([A-Za-z]\d{5}[A-Za-z]{2}\d{4}[A-Za-z]{3}\d{6})\b", cleaned)
         if cin_m:
             return cin_m.group(1).upper()
-    return cleaned
+    return cleaned.strip(" .,;:-—=·/|\"'`")
 
 
 def _parse_gemini_json(text: str) -> dict | None:
