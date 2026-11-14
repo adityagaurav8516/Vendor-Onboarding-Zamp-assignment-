@@ -20,8 +20,13 @@ _KEY_MAP = {
     "account holder": "account_holder",
     "bank name": "bank_name",
     "account number": "account_number",
+    "account no": "account_number",
+    "a/c number": "account_number",
+    "a/c no": "account_number",
+    "account": "account_number",
     "bank code": "bank_code",
     "ifsc": "bank_code",
+    "ifsc code": "bank_code",
     "routing number": "bank_code",
     "document type": "document_type",
 }
@@ -132,16 +137,61 @@ def _same(key: str, left: str, right: str) -> bool:
     return " ".join(left.split()).casefold() == " ".join(right.split()).casefold()
 
 
+_INLINE_PATTERN = re.compile(r"(?:^|[\s,;|])([A-Za-z0-9/&. ]{2,30}?)\s*[:：=]\s*")
+
+
+def _clean_rule_value(value: str, key: str) -> str:
+    cleaned = " ".join((value or "").split()).strip(" .,;:-—=·/|")
+    if not cleaned:
+        return ""
+    if key == "account_number":
+        split_match = re.search(
+            r"\b(?:bank\s+name|bank|ifsc|branch|account\s+holder|a/c)\b",
+            cleaned,
+            re.IGNORECASE,
+        )
+        if split_match and split_match.start() > 0:
+            cleaned = cleaned[: split_match.start()].strip(" .,;:-—=·/|")
+        num_match = re.match(
+            r"^([A-Z]{2}\d{2}[A-Za-z0-9]{10,30}|\d[\d\s\-]{4,24}\d|\d{5,24})\b",
+            cleaned,
+        )
+        if num_match:
+            candidate = num_match.group(1).strip()
+            if len(candidate) < len(cleaned):
+                cleaned = candidate
+        compact = re.sub(r"\s+", "", cleaned)
+        if re.fullmatch(r"[A-Za-z0-9/\-]{5,}", compact):
+            cleaned = compact
+    return cleaned
+
+
 def _rules_extract(text: str) -> dict[str, str]:
     fields = {key: "" for key in _FIELD_NAMES}
     for raw_line in (text or "").splitlines():
         line = " ".join(raw_line.split())
-        if ":" not in line:
+        if not line:
             continue
-        label, value = line.split(":", 1)
-        key = _KEY_MAP.get(label.strip().lower())
-        if key and value.strip() and not fields[key]:
-            fields[key] = value.strip()
+        matches = []
+        for m in _INLINE_PATTERN.finditer(line):
+            lbl = m.group(1).strip().lower()
+            key = _KEY_MAP.get(lbl)
+            if key:
+                matches.append((m.start(1), m.end(), key))
+        if matches:
+            for i, (l_start, v_start, key) in enumerate(matches):
+                if i + 1 < len(matches):
+                    val = line[v_start : matches[i + 1][0]]
+                else:
+                    val = line[v_start:]
+                val = _clean_rule_value(val, key)
+                if val and not fields[key]:
+                    fields[key] = val
+        elif ":" in line:
+            label, value = line.split(":", 1)
+            key = _KEY_MAP.get(label.strip().lower())
+            if key and value.strip() and not fields[key]:
+                fields[key] = _clean_rule_value(value.strip(), key)
     upper = (text or "").upper()
     if not fields["tax_id"]:
         match = re.search(r"\b\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]\b", upper)

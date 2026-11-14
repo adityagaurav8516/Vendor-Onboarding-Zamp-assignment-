@@ -5,7 +5,7 @@ import random
 
 import pytest
 
-from backend import document_parser, layout_parser, ocr_engine
+from backend import ai_extractor, document_parser, layout_parser, ocr_engine
 from backend.pipeline import run_pipeline
 from database.models import DocumentFile
 from test_data.seed import seed_vendors
@@ -338,3 +338,45 @@ def test_real_gemini_flash_reads_a_rendered_scan():
     assert parsed.status == "parsed", parsed.warnings
     assert parsed.ocr_pages == 1
     assert parsed.fields().get("account_number") == "50100987654321"
+
+
+def test_account_number_with_trailing_bank_name_parsed_cleanly():
+    text = "Account Number: 004705001234 Bank name: ICICI Bank"
+    res = layout_parser.parse_text(text)
+    fields = res.fields()
+    assert fields.get("account_number") == "004705001234"
+    assert fields.get("bank_name") == "ICICI Bank"
+
+    extracted, _, _, _ = ai_extractor.extract_fields(text)
+    assert extracted.get("account_number") == "004705001234"
+    assert extracted.get("bank_name") == "ICICI Bank"
+
+
+def test_account_number_with_equals_sign_and_bank_name_parsed_cleanly():
+    text = "account number: 275429653327 bank name = icici bank"
+    res = layout_parser.parse_text(text)
+    fields = res.fields()
+    assert fields.get("account_number") == "275429653327"
+    assert fields.get("bank_name") == "icici bank"
+
+    extracted, _, _, _ = ai_extractor.extract_fields(text)
+    assert extracted.get("account_number") == "275429653327"
+    assert extracted.get("bank_name") == "icici bank"
+
+
+def test_compare_bank_tokens_handles_trailing_label_without_mismatch():
+    from backend.cross_verification import _compare_bank_tokens
+
+    rng = random.Random(42)
+    sub = factories.make_vendor(rng)
+    sub.account_number = "004705001234"
+
+    # Even if extracted token contains trailing bank name
+    checks = []
+    findings = _compare_bank_tokens(
+        sub,
+        {"account_number": "004705001234 Bank name: ICICI Bank", "bank_code": sub.bank_code},
+        checks,
+    )
+    assert not any(f.code == "account_number_mismatch" for f in findings)
+    assert checks[0].result == "match"

@@ -120,6 +120,7 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
 _ID_FIELDS = {"tax_id", "account_number", "bank_code", "registration_number"}
 _TRAILING_FILLER = re.compile(r"\b(no|num|number|code|id)$")
 _COLON = re.compile(r"\s*[:：]\s*")
+_INLINE_PATTERN = re.compile(r"(?:^|[\s,;|])([A-Za-z0-9/&. ]{2,30}?)\s*[:：=]\s*")
 
 
 @dataclass(frozen=True)
@@ -273,7 +274,7 @@ def extract_key_values(lines: list[LayoutLine]) -> list[KeyValue]:
 def _candidates(lines: list[LayoutLine], index: int, line: LayoutLine, text: str) -> list[KeyValue]:
     inline = _inline_split(line, text)
     if inline:
-        return [inline]
+        return inline
     row = _row_split(line, text)
     if row:
         return [row]
@@ -281,25 +282,52 @@ def _candidates(lines: list[LayoutLine], index: int, line: LayoutLine, text: str
     return [stacked] if stacked else []
 
 
-def _inline_split(line: LayoutLine, text: str) -> KeyValue | None:
-    parts = _COLON.split(text, maxsplit=1)
-    if len(parts) != 2:
-        return None
-    label, value = parts
-    field_name = match_label(label)
-    if not field_name:
-        return None
-    value = _clean_value(value, field_name)
-    if not _value_ok(value, field_name):
-        return None
-    return KeyValue(
-        label=label.strip(),
-        value=value,
-        field=field_name,
-        layout="inline",
-        confidence=line.confidence,
-        page=line.page,
-    )
+def _inline_split(line: LayoutLine, text: str) -> list[KeyValue]:
+    matches = []
+    for m in _INLINE_PATTERN.finditer(text):
+        lbl = m.group(1).strip()
+        fld = match_label(lbl)
+        if fld:
+            matches.append((m.start(1), m.end(), lbl, fld))
+    if not matches:
+        parts = _COLON.split(text, maxsplit=1)
+        if len(parts) == 2:
+            label, value = parts
+            field_name = match_label(label)
+            if field_name:
+                value = _clean_value(value, field_name)
+                if _value_ok(value, field_name):
+                    return [
+                        KeyValue(
+                            label=label.strip(),
+                            value=value,
+                            field=field_name,
+                            layout="inline",
+                            confidence=line.confidence,
+                            page=line.page,
+                        )
+                    ]
+        return []
+
+    results = []
+    for i, (l_start, v_start, lbl, fld) in enumerate(matches):
+        if i + 1 < len(matches):
+            val = text[v_start : matches[i + 1][0]]
+        else:
+            val = text[v_start:]
+        val = _clean_value(val, fld)
+        if _value_ok(val, fld):
+            results.append(
+                KeyValue(
+                    label=lbl.strip(),
+                    value=val,
+                    field=fld,
+                    layout="inline",
+                    confidence=line.confidence,
+                    page=line.page,
+                )
+            )
+    return results
 
 
 def _row_split(line: LayoutLine, text: str) -> KeyValue | None:
@@ -403,9 +431,25 @@ def _normalise_label(text: str) -> str:
 
 
 def _clean_value(value: str, field_name: str) -> str:
-    cleaned = " ".join((value or "").split()).strip(" .,;:-—=·")
+    cleaned = " ".join((value or "").split()).strip(" .,;:-—=·/|")
     if not cleaned:
         return ""
+    if field_name == "account_number":
+        split_match = re.search(
+            r"\b(?:bank\s+name|bank|ifsc|branch|account\s+holder|a/c)\b",
+            cleaned,
+            re.IGNORECASE,
+        )
+        if split_match and split_match.start() > 0:
+            cleaned = cleaned[: split_match.start()].strip(" .,;:-—=·/|")
+        num_match = re.match(
+            r"^([A-Z]{2}\d{2}[A-Za-z0-9]{10,30}|\d[\d\s\-]{4,24}\d|\d{5,24})\b",
+            cleaned,
+        )
+        if num_match:
+            candidate = num_match.group(1).strip()
+            if len(candidate) < len(cleaned):
+                cleaned = candidate
     if field_name in _ID_FIELDS:
         compact = re.sub(r"\s+", "", cleaned)
         if re.fullmatch(r"[A-Za-z0-9/\-]{5,}", compact):

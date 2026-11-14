@@ -228,6 +228,19 @@ def _judge_holder(submission: Submission, bank_fields: dict, checks: list[FieldC
     return findings
 
 
+def _clean_account_token(val: str) -> str:
+    cleaned = str(val or "").strip()
+    split_m = re.search(r"\b(?:bank\s+name|bank|ifsc|branch|account\s+holder|a/c)\b", cleaned, re.IGNORECASE)
+    if split_m and split_m.start() > 0:
+        cleaned = cleaned[: split_m.start()].strip(" .,;:-—=·/|")
+    num_m = re.match(r"^([A-Z]{2}\d{2}[A-Za-z0-9]{10,30}|\d[\d\s\-]{4,24}\d|\d{5,24})\b", cleaned)
+    if num_m:
+        cand = num_m.group(1).strip()
+        if len(cand) < len(cleaned):
+            cleaned = cand
+    return cleaned
+
+
 def _compare_bank_tokens(submission: Submission, fields: dict, checks: list[FieldCheck]) -> list[Finding]:
     findings: list[Finding] = []
     pairs = (
@@ -239,7 +252,13 @@ def _compare_bank_tokens(submission: Submission, fields: dict, checks: list[Fiel
         submitted = getattr(submission, key)
         if not extracted:
             continue
-        result = _compare_token(submitted, extracted)
+        effective_extracted = _clean_account_token(extracted) if key == "account_number" else extracted
+        result = _compare_token(submitted, effective_extracted)
+        if result != "match" and key == "account_number":
+            digits_sub = re.sub(r"\D", "", submitted)
+            digits_ext = re.sub(r"\D", "", effective_extracted)
+            if digits_sub and digits_sub == digits_ext:
+                result = "match"
         checks.append(_check(label, submitted, extracted, "Bank letter", result, ""))
         if result == "mismatch":
             findings.append(

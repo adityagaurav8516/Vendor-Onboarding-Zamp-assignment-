@@ -119,6 +119,8 @@ def _prompt() -> str:
         '{"text":"full transcription","fields":{"legal_name":"","tax_id":"",'
         '"registration_number":"","country":"","address":"","account_holder":"",'
         '"bank_name":"","account_number":"","bank_code":""}}. '
+        "Extract only the specific value for each field without including adjacent labels or other fields on the same line "
+        "(for example, account_number must be digits only, never including trailing labels like 'bank name' or bank names). "
         "Use empty strings for fields not present. Do not infer or invent values."
     )
 
@@ -131,6 +133,23 @@ def _image_mime(image: bytes) -> str:
     if image.startswith(b"GIF8"):
         return "image/gif"
     return "image/png"
+
+
+def _clean_ocr_field(field: str, val) -> str:
+    import re
+    cleaned = str(val or "").strip()
+    if not cleaned:
+        return ""
+    if field == "account_number":
+        split_m = re.search(r"\b(?:bank\s+name|bank|ifsc|branch|account\s+holder|a/c)\b", cleaned, re.IGNORECASE)
+        if split_m and split_m.start() > 0:
+            cleaned = cleaned[: split_m.start()].strip(" .,;:-—=·/|")
+        num_m = re.match(r"^([A-Z]{2}\d{2}[A-Za-z0-9]{10,30}|\d[\d\s\-]{4,24}\d|\d{5,24})\b", cleaned)
+        if num_m:
+            cand = num_m.group(1).strip()
+            if len(cand) < len(cleaned):
+                cleaned = cand
+    return cleaned
 
 
 def _normalize_gemini(payload, page: int) -> list[TextWord]:
@@ -147,8 +166,8 @@ def _normalize_gemini(payload, page: int) -> list[TextWord]:
     fields = extracted.get("fields") or {}
     if isinstance(fields, dict):
         semantic_lines = [
-            f"{FIELD_LABELS[field]}: {str(fields.get(field) or '').strip()}"
-            for field in FIELDS if str(fields.get(field) or "").strip()
+            f"{FIELD_LABELS[field]}: {_clean_ocr_field(field, fields.get(field))}"
+            for field in FIELDS if _clean_ocr_field(field, fields.get(field))
         ]
         lines.extend(_lines("\n".join(semantic_lines), page, start=len(lines)))
     return lines
