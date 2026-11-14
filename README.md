@@ -206,6 +206,35 @@ model may only fill a field the labelled parser missed, and any disagreement is 
 while the labelled value is kept. That keeps verdicts reproducible and explainable — the two things
 an auditor asks for.
 
+**Vendor reply loop (multi-turn workflow).** The initial submission often ends in `pending`
+(e.g., a missing GST certificate, wrong checksum digit, or mismatched account holder name).
+Instead of stopping at drafting an email and leaving the user in limbo, VendorFlow provides a
+dedicated **Vendor replies** workflow screen (`pages/4_Vendor_Replies.py`).
+- **Upload missing or replacement paper**: Upload missing documents (e.g. GST certificate) or
+  replacements without needing to re-upload unchanged files.
+- **Form corrections**: Directly correct flagged fields with pre-filled original values.
+- **Selective re-evaluation**: It re-evaluates only affected rules based on what was modified (e.g.
+  parsing only the new document, validating only modified fields, skipping duplicate checks if
+  identifiers did not change), avoiding redundant OCR and re-computation.
+- **Run lineage**: The reply run is linked to the original submission in SQLite via `parent_id`
+  and bidirectionally logged in the audit trail (`vendor_reply` and `reply_received` events).
+- **Before/after diff**: Shows a live visual diff of the decision transition (`pending ➔ approved`),
+  resolved findings with green checkmarks, remaining issues, side-by-side field changes,
+  document actions, and the selective execution audit log.
+
+**Batch upload (CSV & ZIP processing).** To handle "dozens of new vendors every quarter" without manual
+one-by-one entry, VendorFlow includes a **Batch upload** screen (`pages/5_Batch_Upload.py` & `backend/batch_runner.py`).
+- **CSV mode**: Upload a single CSV where each row is a vendor submission. Documents are auto-generated
+  synthetically on the fly from the field values (valid incorporation, GST certificate, bank cheque),
+  allowing instantaneous testing and evaluation of dozens of vendors without manual document bundling.
+  Includes a one-click downloadable 25-row CSV template covering approved, pending, and rejected variants.
+- **ZIP mode**: Upload a `.zip` archive containing multiple vendor `.json` submission files (alongside optional
+  real PDFs referenced in the JSON). Missing document slots automatically fall back to synthetic documents.
+- **Live progress & summary**: Displays an active Streamlit progress bar tracking execution per vendor,
+  followed by an aggregate decision breakdown (approved/pending/rejected) and an interactive results table
+  reporting reference IDs, verdicts, primary rule codes, and elapsed processing times. Results can be downloaded
+  directly as a CSV or reviewed in the Admin Dashboard.
+
 **Rule versions are stamped, not inferred.** Every run carries the `rule_engine_version` of the
 rules that produced it (`backend/rule_version.py`, currently `v1.0.0`), and that string is written
 into the `submissions` row when the run is saved. Re-evaluating an old submission against today's
@@ -325,7 +354,11 @@ app.py                      Overview
 pages/1_Vendor_Submission.py  Run view (live stages)
 pages/2_Admin_Dashboard.py    Dashboard, edge-case self-test, registry
 pages/3_Vendor_Details.py     One record: timeline, checks, documents, audit
+pages/4_Vendor_Replies.py     Vendor reply loop: upload missing paper, selective re-run, diff
+pages/5_Batch_Upload.py       Batch upload: process dozens of vendors from CSV or ZIP with live progress
 backend/                    pipeline, validators, cross-verification, duplicates, decisions
+backend/batch_runner.py     Batch processor, CSV/ZIP parser, synthetic document generator
+backend/reply_runner.py     Selective re-run engine and before/after diff computation
 backend/ocr_engine.py      Gemini Flash adapter (optional, transcription + positioned fields)
 backend/layout_parser.py   geometry-aware key/value reconstruction
 backend/document_parser.py PyMuPDF text layer, OCR fallback, per-page routing

@@ -266,6 +266,19 @@ button[data-baseweb="tab"][aria-selected="true"]{color:var(--green-d);}
 [data-testid="stRadio"] label:has(input:checked){background:var(--green-soft);border-color:var(--green);}
 [data-testid="stRadio"] label>div:first-child{display:none;}
 
+/* ---------- reply diff ---------- */
+.diff-banner{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px 24px;box-shadow:var(--shadow);margin-bottom:1rem;}
+.diff-transition{display:flex;align-items:center;justify-content:center;gap:1.2rem;padding:10px 0 12px;font-size:1.1rem;font-weight:700;}
+.diff-arrow{font-size:1.5rem;color:var(--green);letter-spacing:-.04em;}
+.diff-pill{padding:.35rem 1rem;border-radius:999px;font-size:.82rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase;}
+.diff-pill.ok{background:var(--green-soft);color:var(--green-d);border:1px solid var(--green);}
+.diff-pill.warn{background:var(--amber-soft);color:#8a5a12;border:1px solid var(--amber);}
+.diff-pill.bad{background:var(--red-soft);color:#96281d;border:1px solid var(--red);}
+.resolved-item{display:flex;align-items:flex-start;gap:.6rem;padding:.5rem .75rem;background:var(--green-soft);border-radius:10px;margin-bottom:.4rem;font-size:.85rem;color:var(--green-d);border-left:3px solid var(--green);}
+.remaining-item{display:flex;align-items:flex-start;gap:.6rem;padding:.5rem .75rem;background:var(--amber-soft);border-radius:10px;margin-bottom:.4rem;font-size:.85rem;color:#8a5a12;border-left:3px solid var(--amber);}
+.new-item{display:flex;align-items:flex-start;gap:.6rem;padding:.5rem .75rem;background:#eef2f7;border-radius:10px;margin-bottom:.4rem;font-size:.85rem;color:#2c5282;border-left:3px solid #3182ce;}
+.check-icon{font-weight:800;font-size:1rem;color:var(--green);}
+
 @media (max-width:900px){
   .statgrid{grid-template-columns:repeat(2,1fr);}
   .grid3{grid-template-columns:1fr;}
@@ -328,6 +341,8 @@ def sidebar(active: str) -> None:
     links = (
         ("home", "Overview", "app.py"),
         ("run", "Run a submission", "pages/1_Vendor_Submission.py"),
+        ("reply", "Vendor replies", "pages/4_Vendor_Replies.py"),
+        ("batch", "Batch upload", "pages/5_Batch_Upload.py"),
         ("dashboard", "Dashboard", "pages/2_Admin_Dashboard.py"),
         ("record", "Vendor record", "pages/3_Vendor_Details.py"),
     )
@@ -594,3 +609,27 @@ def scenario_submission_table(submission: dict) -> None:
         if key in FIELD_LABEL
     ]
     st.markdown(f'<dl class="dl">{"".join(rows)}</dl>', unsafe_allow_html=True)
+
+
+def diff_banner(diff) -> None:
+    before_status = diff.before_status
+    after_status = diff.after_status
+    before_label = STATUS_TEXT.get(before_status, before_status)
+    after_label = STATUS_TEXT.get(after_status, after_status)
+    before_cls = STATUS_CLASS.get(before_status, "neutral")
+    after_cls = STATUS_CLASS.get(after_status, "neutral")
+
+    st.markdown(
+        f'<div class="diff-banner">'
+        f'<div class="eyebrow" style="text-align:center;margin-bottom:.3rem;">Workflow Transition</div>'
+        f'<div class="diff-transition">'
+        f'<span class="diff-pill {before_cls}">{esc(before_label)}</span>'
+        f'<span class="diff-arrow">═══════▶</span>'
+        f'<span class="diff-pill {after_cls}">{esc(after_label)}</span>'
+        f'</div>'
+        f'<p class="note" style="text-align:center;margin:0;">Original run: <b>{esc(diff.parent_reference)}</b>'
+        + (f' · Linked reply: <b>{esc(diff.reply_reference)}</b>' if diff.reply_reference else '')
+        + '</p></div>',
+        unsafe_allow_html=True,
+    )
+

@@ -20,10 +20,14 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-left, right, _spacer = st.columns([1.1, 1, 1.2])
-if left.button("Run a submission", type="primary", width="stretch"):
+col1, col2, col3, col4 = st.columns([1.1, 1.1, 1, 1])
+if col1.button("Run a submission", type="primary", width="stretch"):
     st.switch_page("pages/1_Vendor_Submission.py")
-if right.button("Open the dashboard", width="stretch"):
+if col2.button("Process vendor replies", width="stretch"):
+    st.switch_page("pages/4_Vendor_Replies.py")
+if col3.button("Batch upload", width="stretch"):
+    st.switch_page("pages/5_Batch_Upload.py")
+if col4.button("Open the dashboard", width="stretch"):
     st.switch_page("pages/2_Admin_Dashboard.py")
 
 ui.stat_grid(

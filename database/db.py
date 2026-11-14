@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS submissions (
     notification_subject TEXT NOT NULL DEFAULT '',
     notification_body TEXT NOT NULL DEFAULT '',
     rule_engine_version TEXT NOT NULL DEFAULT '',
+    parent_id INTEGER REFERENCES submissions(id),
     created_at TEXT NOT NULL
 );
 
@@ -162,6 +163,13 @@ def _migrate(conn) -> None:
         conn.execute(
             "ALTER TABLE submissions ADD COLUMN rule_engine_version TEXT NOT NULL DEFAULT ''"
         )
+    if "parent_id" not in columns:
+        conn.execute(
+            "ALTER TABLE submissions ADD COLUMN parent_id INTEGER REFERENCES submissions(id)"
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_submissions_parent ON submissions(parent_id)"
+    )
 
 
 def _row(row: sqlite3.Row | None) -> dict | None:
@@ -247,38 +255,73 @@ def save_run(result: RunResult) -> tuple[int, str]:
     """Persist a completed pipeline run. Returns (submission_id, reference)."""
     submission = result.submission
     now = _now()
+    parent_id = getattr(result, "parent_id", None)
     with connect() as conn:
-        cursor = conn.execute(
-            "INSERT INTO vendors (legal_name, trade_name, country, tax_id, registration_number, "
-            "address, contact_name, contact_email, contact_phone, bank_holder_name, bank_name, "
-            "account_number, bank_code, bank_country, status, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                submission.legal_name,
-                submission.trade_name,
-                submission.country,
-                submission.tax_id,
-                submission.registration_number,
-                submission.address,
-                submission.contact_name,
-                submission.contact_email,
-                submission.contact_phone,
-                submission.bank_holder_name,
-                submission.bank_name,
-                submission.account_number,
-                submission.bank_code,
-                submission.bank_country,
-                result.status,
-                now,
-                now,
-            ),
-        )
-        vendor_id = int(cursor.lastrowid)
+        vendor_id = None
+        if parent_id is not None:
+            parent_row = conn.execute(
+                "SELECT vendor_id FROM submissions WHERE id = ?", (parent_id,)
+            ).fetchone()
+            if parent_row:
+                vendor_id = int(parent_row["vendor_id"])
+                conn.execute(
+                    "UPDATE vendors SET legal_name = ?, trade_name = ?, country = ?, tax_id = ?, "
+                    "registration_number = ?, address = ?, contact_name = ?, contact_email = ?, "
+                    "contact_phone = ?, bank_holder_name = ?, bank_name = ?, account_number = ?, "
+                    "bank_code = ?, bank_country = ?, status = ?, updated_at = ? WHERE id = ?",
+                    (
+                        submission.legal_name,
+                        submission.trade_name,
+                        submission.country,
+                        submission.tax_id,
+                        submission.registration_number,
+                        submission.address,
+                        submission.contact_name,
+                        submission.contact_email,
+                        submission.contact_phone,
+                        submission.bank_holder_name,
+                        submission.bank_name,
+                        submission.account_number,
+                        submission.bank_code,
+                        submission.bank_country,
+                        result.status,
+                        now,
+                        vendor_id,
+                    ),
+                )
+        if vendor_id is None:
+            cursor = conn.execute(
+                "INSERT INTO vendors (legal_name, trade_name, country, tax_id, registration_number, "
+                "address, contact_name, contact_email, contact_phone, bank_holder_name, bank_name, "
+                "account_number, bank_code, bank_country, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    submission.legal_name,
+                    submission.trade_name,
+                    submission.country,
+                    submission.tax_id,
+                    submission.registration_number,
+                    submission.address,
+                    submission.contact_name,
+                    submission.contact_email,
+                    submission.contact_phone,
+                    submission.bank_holder_name,
+                    submission.bank_name,
+                    submission.account_number,
+                    submission.bank_code,
+                    submission.bank_country,
+                    result.status,
+                    now,
+                    now,
+                ),
+            )
+            vendor_id = int(cursor.lastrowid)
+
         cursor = conn.execute(
             "INSERT INTO submissions (reference, vendor_id, status, machine_status, headline, "
             "summary, extraction_method, duplicate_of, scenario_id, notification_subject, "
-            "notification_body, rule_engine_version, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "notification_body, rule_engine_version, parent_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 "VF-TEMP",
                 vendor_id,
@@ -292,6 +335,7 @@ def save_run(result: RunResult) -> tuple[int, str]:
                 result.notification_subject,
                 result.notification_body,
                 result.rule_engine_version,
+                parent_id,
                 now,
             ),
         )
@@ -367,18 +411,47 @@ def save_run(result: RunResult) -> tuple[int, str]:
                 ),
             )
 
-        conn.execute(
-            "INSERT INTO events (submission_id, event, detail, actor, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (
-                submission_id,
-                "submitted",
-                f"{reference} processed: {result.status} "
-                f"(rules {result.rule_engine_version or 'unversioned'}).",
-                "pipeline",
-                now,
-            ),
-        )
+        if parent_id is not None:
+            parent_ref = conn.execute(
+                "SELECT reference FROM submissions WHERE id = ?", (parent_id,)
+            ).fetchone()
+            parent_reference = parent_ref["reference"] if parent_ref else f"VF-{parent_id:04d}"
+            conn.execute(
+                "INSERT INTO events (submission_id, event, detail, actor, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    submission_id,
+                    "vendor_reply",
+                    f"{reference} processed as reply to {parent_reference}: {result.status} "
+                    f"(rules {result.rule_engine_version or 'unversioned'}).",
+                    "vendor_reply_loop",
+                    now,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO events (submission_id, event, detail, actor, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    parent_id,
+                    "reply_received",
+                    f"Vendor reply processed in {reference}: status updated to {result.status}.",
+                    "vendor_reply_loop",
+                    now,
+                ),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO events (submission_id, event, detail, actor, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    submission_id,
+                    "submitted",
+                    f"{reference} processed: {result.status} "
+                    f"(rules {result.rule_engine_version or 'unversioned'}).",
+                    "pipeline",
+                    now,
+                ),
+            )
     return submission_id, reference
 
 
@@ -422,14 +495,17 @@ def _submission_select() -> str:
     return (
         "SELECT s.id, s.reference, s.status, s.machine_status, s.headline, s.summary, "
         "s.extraction_method, s.duplicate_of, s.scenario_id, s.rule_engine_version, s.created_at, "
-        "s.notification_subject, s.notification_body, "
+        "s.notification_subject, s.notification_body, s.parent_id, "
+        "p.reference AS parent_reference, "
         "v.legal_name, v.country, v.tax_id, v.registration_number, v.contact_email, "
         "v.bank_holder_name, v.bank_name, v.bank_country, "
         "(SELECT COUNT(*) FROM findings f WHERE f.submission_id = s.id "
         " AND f.severity IN ('pending','reject')) AS issue_count, "
         "(SELECT f.message FROM findings f WHERE f.submission_id = s.id "
         " AND f.severity IN ('pending','reject') ORDER BY f.id LIMIT 1) AS top_issue "
-        "FROM submissions s JOIN vendors v ON v.id = s.vendor_id"
+        "FROM submissions s "
+        "JOIN vendors v ON v.id = s.vendor_id "
+        "LEFT JOIN submissions p ON p.id = s.parent_id"
     )
 
 
@@ -513,9 +589,23 @@ def get_submission_bundle(submission_id: int) -> dict | None:
             "ORDER BY id",
             (submission_id,),
         ).fetchall()
+        replies = conn.execute(
+            "SELECT id, reference, status, machine_status, headline, summary, created_at "
+            "FROM submissions WHERE parent_id = ? ORDER BY id ASC",
+            (submission_id,),
+        ).fetchall()
+        parent = None
+        if "parent_id" in submission.keys() and submission["parent_id"]:
+            parent = conn.execute(
+                "SELECT id, reference, status, machine_status, headline, created_at "
+                "FROM submissions WHERE id = ?",
+                (submission["parent_id"],),
+            ).fetchone()
     return {
         "submission": dict(submission),
         "vendor": dict(vendor),
+        "parent": _row(parent),
+        "replies": _rows(replies),
         "documents": [
             {
                 **{key: row[key] for key in row.keys() if key not in {"fields_json", "warnings_json"}},
@@ -535,6 +625,14 @@ def get_submission_bundle(submission_id: int) -> dict | None:
         ],
         "events": _rows(events),
     }
+
+
+def get_linked_replies(submission_id: int) -> list[dict]:
+    query = _submission_select() + " WHERE s.parent_id = ? ORDER BY s.id ASC"
+    with connect() as conn:
+        rows = conn.execute(query, (submission_id,)).fetchall()
+    return _rows(rows)
+
 
 
 def dashboard_counts() -> dict[str, int]:

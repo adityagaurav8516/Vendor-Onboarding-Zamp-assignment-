@@ -100,3 +100,48 @@ class RunResult:
     submission: Submission
     scenario_id: str | None = None
     rule_engine_version: str = ""
+    parent_id: int | None = None
+
+
+@dataclass
+class FieldDiff:
+    field: str
+    label: str
+    old_value: str
+    new_value: str
+
+
+@dataclass
+class DocumentDiff:
+    slot: str
+    label: str
+    action: str  # "added", "replaced", "retained", "missing"
+    old_filename: str | None
+    new_filename: str | None
+
+
+@dataclass
+class FindingDiff:
+    code: str
+    severity: str
+    stage: str
+    message: str
+    status: str  # "resolved", "remaining", "new"
+
+
+@dataclass
+class ReplyDiff:
+    parent_id: int
+    parent_reference: str
+    reply_id: int | None
+    reply_reference: str | None
+    before_status: str
+    after_status: str
+    field_diffs: list[FieldDiff]
+    document_diffs: list[DocumentDiff]
+    resolved_findings: list[FindingDiff]
+    remaining_findings: list[FindingDiff]
+    new_findings: list[FindingDiff]
+    affected_rules: list[str]
+    skipped_rules: list[str]
+

@@ -33,7 +33,7 @@ top[2].metric("Needs a reply", counts["pending"])
 top[3].metric("Rejected", counts["rejected"])
 
 tab_runs, tab_edges, tab_registry, tab_reset = st.tabs(
-    ["Runs", "Test scenarios", "Vendors", "Reset"]
+    ["Runs", "Test scenarios", "Vendor registry", "Reset"]
 )
 
 # --------------------------------------------------------------------- runs
@@ -58,7 +58,7 @@ with tab_runs:
     else:
         table = [
             {
-                "Reference": row["reference"],
+                "Reference": row["reference"] + (f" ↳ {row['parent_reference']}" if row.get("parent_reference") else ""),
                 "Vendor": row["legal_name"],
                 "Country": row["country"],
                 "Decision": ui.STATUS_TEXT.get(row["status"], row["status"]),
@@ -82,20 +82,24 @@ with tab_runs:
         )
         selection = getattr(event, "selection", None)
         selected = list(selection["rows"]) if selection else []
-        controls = st.columns([3, 1.2, 1.2])
+        controls = st.columns([2.5, 1.1, 1.2, 1.1])
         if selected:
             picked = rows[selected[0]]
             controls[0].caption(f"{picked['reference']} selected · {picked['legal_name']}")
             if controls[1].button("Open record →", type="primary", key="open-run"):
                 st.session_state["record_id"] = picked["id"]
                 st.switch_page("pages/3_Vendor_Details.py")
+            if picked["status"] == "pending":
+                if controls[2].button("Vendor reply →", key="open-reply"):
+                    st.session_state["reply_submission_id"] = picked["id"]
+                    st.switch_page("pages/4_Vendor_Replies.py")
         else:
             controls[0].caption("Select a row to open its full record.")
         buffer = io.StringIO()
         writer = csv.DictWriter(buffer, fieldnames=list(table[0].keys()))
         writer.writeheader()
         writer.writerows(table)
-        controls[2].download_button(
+        controls[3].download_button(
             "Export CSV",
             data=buffer.getvalue(),
             file_name="vendorflow-runs.csv",
@@ -162,6 +166,13 @@ with tab_edges:
 
 with tab_registry:
     st.write("")
+    st.markdown(
+        '<p class="note"><b>Master Vendor Registry (ERP)</b> — The company\'s existing vendor database. '
+        'Incoming submissions are cross-checked against these records to detect duplicate tax IDs, '
+        'reused payout accounts, and blocked entities. When demo data is reset, submission history is '
+        'wiped clean while the registry returns to its 3 benchmark seed records.</p>',
+        unsafe_allow_html=True,
+    )
     needle = st.text_input("Filter the registry", placeholder="Name, tax ID or CIN", key="registry-search")
     visible = [
         vendor
@@ -191,10 +202,23 @@ with tab_registry:
 
 with tab_reset:
     st.write("")
+    if st.session_state.pop("reset_done", False):
+        st.success(
+            "Demo data reset complete. All submitted runs and audit trails have been wiped. "
+            "The Master Vendor Registry has been restored to its 3 benchmark records (Zenith, Orbit, Bluepeak)."
+        )
+
+    st.markdown(
+        '<p class="note">Resetting wipes all submission records, document extractions, and audit logs. '
+        'The Master Vendor Registry is restored to its 3 seed vendors '
+        '(<b>Zenith Components</b> [approved], <b>Orbit Logistics</b> [pending], and <b>Bluepeak Traders</b> [blocked]) '
+        'which are required for duplicate account and blocked vendor detection.</p>',
+        unsafe_allow_html=True,
+    )
     confirm = st.checkbox("I understand this deletes all saved runs", key="reset-confirm")
     if st.button("Reset demo data", disabled=not confirm, key="reset-data"):
         db.reset_demo_data()
         for key in ("record_id", "last_render_id", "edge_results", "runs-table"):
             st.session_state.pop(key, None)
-        st.success("Demo data reset. The registry is back to its three seed records.")
+        st.session_state["reset_done"] = True
         st.rerun()

@@ -49,12 +49,40 @@ vendor = bundle["vendor"]
 st.write("")
 ui.decision_block(bundle)
 
+if bundle.get("parent"):
+    parent = bundle["parent"]
+    p_col1, p_col2 = st.columns([3, 1.2])
+    p_col1.info(f"🔗 **Linked run**: This record is a vendor reply to **{parent['reference']}** ({ui.STATUS_TEXT.get(parent['status'], parent['status'])}).")
+    if p_col2.button(f"View original {parent['reference']} →", key="view-parent"):
+        st.session_state["record_id"] = parent["id"]
+        st.rerun()
+
+if bundle.get("replies"):
+    for rep in bundle["replies"]:
+        r_col1, r_col2 = st.columns([3, 1.2])
+        r_col1.success(f"↳ **Follow-up reply on file**: **{rep['reference']}** ({ui.STATUS_TEXT.get(rep['status'], rep['status'])}).")
+        if r_col2.button(f"View reply {rep['reference']} →", key=f"view-reply-{rep['id']}"):
+            st.session_state["record_id"] = rep["id"]
+            st.rerun()
+
 st.write("")
-actions = st.columns([1, 1, 1.4])
-if actions[0].button("← Dashboard"):
-    st.switch_page("pages/2_Admin_Dashboard.py")
-if actions[1].button("Run another submission"):
-    st.switch_page("pages/1_Vendor_Submission.py")
+if submission["status"] == "pending":
+    actions = st.columns([1, 1, 1.3, 1.4])
+    if actions[0].button("← Dashboard"):
+        st.switch_page("pages/2_Admin_Dashboard.py")
+    if actions[1].button("Run another"):
+        st.switch_page("pages/1_Vendor_Submission.py")
+    if actions[2].button("Process vendor reply →", type="primary"):
+        st.session_state["reply_submission_id"] = submission_id
+        st.switch_page("pages/4_Vendor_Replies.py")
+    download_col = actions[3]
+else:
+    actions = st.columns([1, 1, 1.4])
+    if actions[0].button("← Dashboard"):
+        st.switch_page("pages/2_Admin_Dashboard.py")
+    if actions[1].button("Run another submission"):
+        st.switch_page("pages/1_Vendor_Submission.py")
+    download_col = actions[2]
 export = {
     "reference": submission["reference"],
     "status": submission["status"],
@@ -77,7 +105,7 @@ export = {
         "body": submission["notification_body"],
     },
 }
-actions[2].download_button(
+download_col.download_button(
     "Export this record as JSON",
     data=json.dumps(export, indent=2, default=str),
     file_name=f'{submission["reference"]}.json',
