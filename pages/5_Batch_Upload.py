@@ -25,6 +25,16 @@ st.set_page_config(
 )
 ui.apply_theme()
 ui.sidebar("batch")
+
+# Auto-clear stale batch summaries if data was reset in the database
+if any(k in st.session_state for k in ("csv_batch_results", "zip_batch_results")):
+    valid_refs = {s["reference"] for s in db.list_submissions()}
+    for key in ("csv_batch_results", "zip_batch_results"):
+        res_list = st.session_state.get(key)
+        if res_list:
+            if not any(r.reference and r.reference in valid_refs for r in res_list):
+                st.session_state.pop(key, None)
+
 ui.page_header(
     "Vendor onboarding",
     "Batch upload",
@@ -248,7 +258,7 @@ with tab_csv:
         _render_summary_table(results)
 
         st.markdown("<br>", unsafe_allow_html=True)
-        col_dl, col_dash = st.columns([1, 1])
+        col_dl, col_dash, col_clear = st.columns([1, 1, 1])
         with col_dl:
             st.download_button(
                 "⬇ Download results as CSV",
@@ -260,6 +270,10 @@ with tab_csv:
         with col_dash:
             if st.button("View all in Dashboard →", key="csv-to-dash"):
                 st.switch_page("pages/2_Admin_Dashboard.py")
+        with col_clear:
+            if st.button("🗑 Clear batch summary", key="clear-csv-summary"):
+                st.session_state.pop("csv_batch_results", None)
+                st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -407,7 +421,7 @@ with tab_zip:
         _render_summary_table(results)
 
         st.markdown("<br>", unsafe_allow_html=True)
-        col_dl, col_dash = st.columns([1, 1])
+        col_dl, col_dash, col_clear = st.columns([1, 1, 1])
         with col_dl:
             st.download_button(
                 "⬇ Download results as CSV",
@@ -419,3 +433,7 @@ with tab_zip:
         with col_dash:
             if st.button("View all in Dashboard →", key="zip-to-dash"):
                 st.switch_page("pages/2_Admin_Dashboard.py")
+        with col_clear:
+            if st.button("🗑 Clear batch summary", key="clear-zip-summary"):
+                st.session_state.pop("zip_batch_results", None)
+                st.rerun()

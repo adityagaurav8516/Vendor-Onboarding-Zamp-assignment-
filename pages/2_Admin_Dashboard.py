@@ -218,7 +218,16 @@ with tab_reset:
     confirm = st.checkbox("I understand this deletes all saved runs", key="reset-confirm")
     if st.button("Reset demo data", disabled=not confirm, key="reset-data"):
         db.reset_demo_data()
-        for key in ("record_id", "last_render_id", "edge_results", "runs-table"):
+        keys_to_clear = [
+            k for k in list(st.session_state.keys())
+            if "batch" in k.lower() or k in {
+                "record_id", "last_render_id", "edge_results", "runs-table",
+                "reply_submission_id", "selected_reply_id", "preset_applied",
+                "last_diff", "last_result_id", "last_bundle", "preset_scenario",
+                "scenario_choice",
+            }
+        ]
+        for key in keys_to_clear:
             st.session_state.pop(key, None)
         st.session_state["reset_done"] = True
         st.rerun()

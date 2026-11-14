@@ -382,3 +382,17 @@ def test_results_csv_bytes():
     assert len(rows) == 2
     assert rows[0]["Decision"] == "approved"
     assert rows[1]["Error"] == "boom"
+
+
+def test_batch_results_detected_as_stale_after_db_reset():
+    items = parse_csv(sample_csv_bytes())[:2]
+    results = run_batch(items, source="csv")
+    assert len(results) == 2
+    valid_refs = {s["reference"] for s in db.list_submissions()}
+    assert any(r.reference and r.reference in valid_refs for r in results)
+
+    # After reset
+    db.reset_demo_data()
+    valid_refs_after = {s["reference"] for s in db.list_submissions()}
+    assert not any(r.reference and r.reference in valid_refs_after for r in results)
+
