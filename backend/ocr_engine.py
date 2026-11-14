@@ -169,7 +169,10 @@ def _normalize_gemini(payload, page: int) -> list[TextWord]:
             f"{FIELD_LABELS[field]}: {_clean_ocr_field(field, fields.get(field))}"
             for field in FIELDS if _clean_ocr_field(field, fields.get(field))
         ]
-        lines.extend(_lines("\n".join(semantic_lines), page, start=len(lines)))
+        # Start below the last transcript row, not after the *count* of rows: blank
+        # transcript lines use up row numbers and would otherwise collide with these.
+        next_row = int(max(word.y0 for word in lines) // 20) + 1 if lines else 0
+        lines.extend(_lines("\n".join(semantic_lines), page, start=next_row))
     return lines
 
 

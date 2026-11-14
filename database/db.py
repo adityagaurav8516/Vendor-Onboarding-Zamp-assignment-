@@ -239,6 +239,14 @@ def load_registry() -> list[ExistingVendor]:
     ]
 
 
+def vendor_id_for_submission(submission_id: int) -> int | None:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT vendor_id FROM submissions WHERE id = ?", (submission_id,)
+        ).fetchone()
+    return int(row["vendor_id"]) if row else None
+
+
 def list_registry() -> list[dict]:
     with connect() as conn:
         rows = conn.execute(
@@ -502,7 +510,8 @@ def _submission_select() -> str:
         "(SELECT COUNT(*) FROM findings f WHERE f.submission_id = s.id "
         " AND f.severity IN ('pending','reject')) AS issue_count, "
         "(SELECT f.message FROM findings f WHERE f.submission_id = s.id "
-        " AND f.severity IN ('pending','reject') ORDER BY f.id LIMIT 1) AS top_issue "
+        " AND f.severity IN ('pending','reject') "
+        " ORDER BY CASE f.severity WHEN 'reject' THEN 0 ELSE 1 END, f.id LIMIT 1) AS top_issue "
         "FROM submissions s "
         "JOIN vendors v ON v.id = s.vendor_id "
         "LEFT JOIN submissions p ON p.id = s.parent_id"

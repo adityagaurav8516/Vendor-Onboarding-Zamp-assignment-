@@ -216,6 +216,11 @@ def match_label(text: str) -> str:
     stripped = _TRAILING_FILLER.sub("", cleaned).strip()
     if stripped and stripped != cleaned:
         candidates.append(stripped)
+    # A label that matches an alias as printed wins over one that only matches after
+    # its trailing "code"/"no"/"number" is trimmed: "Bank Code" is not "Bank".
+    for field_name, aliases in FIELD_ALIASES.items():
+        if any(cleaned == _normalise_label(alias) for alias in aliases):
+            return field_name
     best_field, best_score = "", 0.0
     for field_name, aliases in FIELD_ALIASES.items():
         for alias in aliases:

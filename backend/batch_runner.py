@@ -12,8 +12,9 @@ from typing import Callable
 
 from backend.field_validator import gstin_checksum
 from backend.pipeline import run_pipeline
+from backend.submission_loader import coerce_text
 from database import db
-from database.models import DocumentFile, ExistingVendor, Submission
+from database.models import DocumentFile, ExistingVendor, Finding, Submission
 from test_data import synthetic
 
 # ---------------------------------------------------------------------------
@@ -119,8 +120,13 @@ def parse_csv(file_bytes: bytes) -> list[dict]:
         )
     rows = []
     for i, row in enumerate(reader, start=2):  # row 1 = header
-        # Strip whitespace from all values
-        clean = {k: (v or "").strip() for k, v in row.items()}
+        # Strip whitespace from all values. Cells beyond the header land under the
+        # ``None`` key (as a list); they carry no known field, so they are dropped.
+        clean = {
+            k: (v or "").strip()
+            for k, v in row.items()
+            if k is not None and not isinstance(v, list)
+        }
         clean["_row"] = i
         rows.append(clean)
     if not rows:
@@ -129,7 +135,16 @@ def parse_csv(file_bytes: bytes) -> list[dict]:
 
 
 def row_to_submission(row: dict) -> Submission:
-    return Submission(**{k: row.get(k, "") for k in SUBMISSION_FIELDS})
+    return Submission(**{k: coerce_text(row.get(k)) for k in SUBMISSION_FIELDS})
+
+
+def primary_code(findings: list[Finding]) -> str:
+    """The rule that decided the outcome: a reject, else a pending reason, else a warning."""
+    for severity in ("reject", "pending", "warn"):
+        for item in findings:
+            if item.severity == severity:
+                return item.code
+    return "—"
 
 
 # ---------------------------------------------------------------------------
@@ -213,8 +228,9 @@ def run_batch(
     on_progress(done, total, vendor_name, status_or_None) is called after
     each vendor finishes.  `status` is None while running.
     """
-    if existing is None:
-        existing = db.load_registry()
+    # Work on a private copy: every vendor saved below joins it, so a company that
+    # appears twice in one batch is judged against its own earlier row.
+    existing = list(db.load_registry() if existing is None else existing)
 
     results: list[BatchResult] = []
     total = len(items)
@@ -244,8 +260,23 @@ def run_batch(
 
             result = run_pipeline(submission, documents, existing, scenario_id=None)
             submission_id, reference = db.save_run(result)
+            vendor_id = db.vendor_id_for_submission(submission_id)
+            if vendor_id is not None:
+                existing.append(
+                    ExistingVendor(
+                        id=vendor_id,
+                        legal_name=submission.legal_name,
+                        country=submission.country,
+                        tax_id=submission.tax_id,
+                        registration_number=submission.registration_number,
+                        account_number=submission.account_number,
+                        bank_code=submission.bank_code,
+                        contact_email=submission.contact_email,
+                        status=result.status,
+                    )
+                )
 
-            top_code = result.findings[0].code if result.findings else "—"
+            top_code = primary_code(result.findings)
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
 
             br = BatchResult(
@@ -352,7 +383,7 @@ _SAMPLE_ROWS: list[dict] = [
     },
     {
         "legal_name": "GlobalMart Retail Pvt Ltd", "trade_name": "GlobalMart",
-        "country": "India", "tax_id": _gstin("16", "AABCG7890I"),
+        "country": "India", "tax_id": _gstin("19", "AABCG7890I"),
         "registration_number": "U52100WB2019PTC111007",
         "address": "3 Park Street, Kolkata, West Bengal 700016",
         "contact_name": "Ananya Das", "contact_email": "ananya@globalmart.in",
@@ -432,7 +463,7 @@ _SAMPLE_ROWS: list[dict] = [
     },
     {
         "legal_name": "Orion Infra Pvt Ltd", "trade_name": "Orion Infra",
-        "country": "India", "tax_id": _gstin("03", "AABCO5678Q"),
+        "country": "India", "tax_id": _gstin("04", "AABCO5678Q"),
         "registration_number": "U45400PB2017PTC111015",
         "address": "22 Sector 17, Chandigarh 160017",
         "contact_name": "Gurpreet Sandhu", "contact_email": "gurpreet@orioninfra.in",

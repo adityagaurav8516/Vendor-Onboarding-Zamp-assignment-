@@ -7,8 +7,16 @@ from database.models import ExistingVendor, Finding, Submission
 
 
 def find_duplicates(
-    submission: Submission, existing: list[ExistingVendor]
+    submission: Submission,
+    existing: list[ExistingVendor],
+    exclude_vendor_id: int | None = None,
 ) -> tuple[list[Finding], int | None]:
+    """Compare a submission with the registry.
+
+    ``exclude_vendor_id`` removes the submitting vendor's own record, so a reply
+    to an earlier submission is never matched against itself.
+    """
+    existing = _without(existing, exclude_vendor_id)
     tax = _tax(submission.tax_id)
     registration = _token(submission.registration_number)
     account = _digits(submission.account_number)
@@ -66,7 +74,7 @@ def find_duplicates(
     pool = approved or identity
     vendor, reasons = max(pool, key=lambda hit: _rank(hit[0], hit[1]))
     reason_text = _join(reasons)
-    if vendor.status != "approved":
+    if vendor_status(vendor) != "approved":
         return [
             Finding(
                 code="prior_submission",
@@ -130,8 +138,13 @@ def _shared_account(submission: Submission, existing: list[ExistingVendor]) -> E
     return None
 
 
-def blocked_vendor(submission: Submission, existing: list[ExistingVendor]) -> Finding | None:
+def blocked_vendor(
+    submission: Submission,
+    existing: list[ExistingVendor],
+    exclude_vendor_id: int | None = None,
+) -> Finding | None:
     """A vendor the company has already blocked on this tax ID or registration cannot be onboarded."""
+    existing = _without(existing, exclude_vendor_id)
     tax = _tax(submission.tax_id)
     registration = _token(submission.registration_number)
     for vendor in existing:
@@ -157,7 +170,13 @@ def blocked_vendor(submission: Submission, existing: list[ExistingVendor]) -> Fi
 
 
 def vendor_status(vendor: ExistingVendor) -> str:
-    return (vendor.status or "").lower()
+    return (vendor.status or "").strip().lower()
+
+
+def _without(existing: list[ExistingVendor], vendor_id: int | None) -> list[ExistingVendor]:
+    if vendor_id is None:
+        return list(existing)
+    return [vendor for vendor in existing if vendor.id != vendor_id]
 
 
 def _rank(vendor: ExistingVendor, reasons: list[str]) -> int:
@@ -166,7 +185,7 @@ def _rank(vendor: ExistingVendor, reasons: list[str]) -> int:
         score += 4
     if "registration number" in reasons:
         score += 2
-    if vendor.status == "approved":
+    if vendor_status(vendor) == "approved":
         score += 1
     return score
 

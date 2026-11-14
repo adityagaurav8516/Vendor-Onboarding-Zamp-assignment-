@@ -81,6 +81,74 @@ def bundle_to_submission(bundle: dict) -> Submission:
     )
 
 
+def _carried_document_findings(parent_bundle: dict, slot: str, p_doc: dict) -> list[Finding]:
+    """Document findings from the parent run that still hold for an unchanged upload.
+
+    Findings are attached to a slot by the state of the stored document and the
+    file name in the message, not by the slot name appearing in the text: a
+    flagged upload (unreadable, wrong slot, nothing read) must stay flagged until
+    the vendor replaces it.
+    """
+    filename = p_doc.get("filename") or ""
+    parse_status = p_doc.get("parse_status")
+    document_type = p_doc.get("document_type")
+    has_fields = any(str(value or "").strip() for value in (p_doc.get("fields") or {}).values())
+
+    still_applies = {
+        "unreadable_document": parse_status != "parsed",
+        "wrong_document": parse_status == "parsed" and document_type == "wrong_slot",
+        "extraction_unclear": parse_status == "parsed" and document_type != "wrong_slot" and not has_fields,
+        "ocr_low_confidence": True,
+    }
+    carried: list[Finding] = []
+    seen: set[str] = set()
+    for item in parent_bundle.get("findings", []):
+        code = item.get("code")
+        if item.get("stage") != "documents" or not still_applies.get(code, False):
+            continue
+        if filename and filename not in item.get("message", ""):
+            continue
+        if code in seen:
+            continue
+        seen.add(code)
+        carried.append(
+            Finding(
+                code=code,
+                severity=item["severity"],
+                stage=item["stage"],
+                message=item["message"],
+                vendor_message=item.get("vendor_message"),
+            )
+        )
+
+    # Older runs, or findings with unexpected wording: rebuild what the stored state implies.
+    if parse_status != "parsed" and "unreadable_document" not in seen:
+        carried.append(
+            Finding(
+                code="unreadable_document",
+                severity="pending",
+                stage="documents",
+                message=f"{filename or slot} could not be parsed as text.",
+                vendor_message=(
+                    f"The file {filename or slot} could not be read. "
+                    "Please upload a readable PDF or a plain text copy."
+                ),
+            )
+        )
+    elif parse_status == "parsed" and document_type == "wrong_slot" and "wrong_document" not in seen:
+        expected = KIND_LABEL.get(SLOT_KIND.get(slot, ""), "document")
+        carried.append(
+            Finding(
+                code="wrong_document",
+                severity="pending",
+                stage="documents",
+                message=f"{filename or slot} was uploaded as a {expected}, but it reads like a different document.",
+                vendor_message=f"The file {filename or slot} does not look like a {expected}. Please upload the {expected}.",
+            )
+        )
+    return carried
+
+
 def identify_changes(
     original: Submission,
     updated: Submission,
@@ -244,6 +312,8 @@ def run_vendor_reply(
     """
     new_documents = new_documents or {}
     existing = existing or []
+    # The vendor row is updated in place by a reply, so it must never be compared with itself.
+    own_vendor_id = (parent_bundle.get("vendor") or {}).get("id")
     parent_sub = parent_bundle["submission"]
     parent_id = parent_sub["id"]
     parent_ref = parent_sub["reference"]
@@ -418,17 +488,7 @@ def run_vendor_reply(
             )
             parsed_docs.append(parsed_doc)
             # Carry forward any uncorrected findings for this unchanged slot
-            for f in parent_bundle.get("findings", []):
-                if f.get("stage") == "documents" and slot in f.get("message", ""):
-                    doc_findings.append(
-                        Finding(
-                            code=f["code"],
-                            severity=f["severity"],
-                            stage=f["stage"],
-                            message=f["message"],
-                            vendor_message=f.get("vendor_message"),
-                        )
-                    )
+            doc_findings.extend(_carried_document_findings(parent_bundle, slot, p_doc))
             doc_details.append(f"Preserved {p_doc['filename']} ({slot}) from original run (0 extraction calls).")
         else:
             # Document missing
@@ -504,14 +564,19 @@ def run_vendor_reply(
     cross_bank_affected = "bank_proof" in changed_slots or bool(
         changed_fields.intersection({"bank_holder_name", "bank_name", "account_number", "bank_code"})
     )
+    # Payout country is compared with the vendor country and the tax ID's home country.
+    cross_payout_country_affected = bool(changed_fields.intersection({"bank_country", "country", "tax_id"}))
     cross_state_affected = bool(changed_fields.intersection({"tax_id", "address"}))
-    cross_jurisdiction_affected = "country" in changed_fields or bool(changed_slots)
+    cross_jurisdiction_affected = (
+        bool(changed_fields.intersection({"country", "bank_country"})) or bool(changed_slots)
+    )
 
     any_cross_affected = (
         cross_incorp_affected
         or cross_tax_affected
         or cross_bank_affected
         or cross_state_affected
+        or cross_payout_country_affected
         or cross_jurisdiction_affected
     )
 
@@ -525,6 +590,8 @@ def run_vendor_reply(
             affected_cross_parts.append("bank proof")
         if cross_state_affected:
             affected_cross_parts.append("state vs address")
+        if cross_payout_country_affected or cross_jurisdiction_affected:
+            affected_cross_parts.append("payout country")
         affected_rules.append(f"Cross-document verification ({', '.join(affected_cross_parts)})")
 
         cross_findings, cross_checks = cross_verification.cross_check(updated_submission, parsed_docs)
@@ -575,8 +642,12 @@ def run_vendor_reply(
     dup_affected = bool(changed_fields.intersection(DUPLICATE_KEYS))
     if dup_affected:
         affected_rules.append(f"Duplicate & blocklist detection (identifiers: {', '.join(sorted(changed_fields.intersection(DUPLICATE_KEYS)))})")
-        dup_findings, duplicate_of = duplicate_detector.find_duplicates(updated_submission, existing)
-        blocked = duplicate_detector.blocked_vendor(updated_submission, existing)
+        dup_findings, duplicate_of = duplicate_detector.find_duplicates(
+            updated_submission, existing, exclude_vendor_id=own_vendor_id
+        )
+        blocked = duplicate_detector.blocked_vendor(
+            updated_submission, existing, exclude_vendor_id=own_vendor_id
+        )
         if blocked is not None:
             dup_findings.append(blocked)
         findings.extend(dup_findings)

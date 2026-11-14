@@ -1,0 +1,687 @@
+diff --git a/backend/batch_runner.py b/backend/batch_runner.py
+index 85037e4..df22d66 100644
+--- a/backend/batch_runner.py
++++ b/backend/batch_runner.py
+@@ -12,8 +12,9 @@ from typing import Callable
+ 
+ from backend.field_validator import gstin_checksum
+ from backend.pipeline import run_pipeline
++from backend.submission_loader import coerce_text
+ from database import db
+-from database.models import DocumentFile, ExistingVendor, Submission
++from database.models import DocumentFile, ExistingVendor, Finding, Submission
+ from test_data import synthetic
+ 
+ # ---------------------------------------------------------------------------
+@@ -119,8 +120,13 @@ def parse_csv(file_bytes: bytes) -> list[dict]:
+         )
+     rows = []
+     for i, row in enumerate(reader, start=2):  # row 1 = header
+-        # Strip whitespace from all values
+-        clean = {k: (v or "").strip() for k, v in row.items()}
++        # Strip whitespace from all values. Cells beyond the header land under the
++        # ``None`` key (as a list); they carry no known field, so they are dropped.
++        clean = {
++            k: (v or "").strip()
++            for k, v in row.items()
++            if k is not None and not isinstance(v, list)
++        }
+         clean["_row"] = i
+         rows.append(clean)
+     if not rows:
+@@ -129,7 +135,16 @@ def parse_csv(file_bytes: bytes) -> list[dict]:
+ 
+ 
+ def row_to_submission(row: dict) -> Submission:
+-    return Submission(**{k: row.get(k, "") for k in SUBMISSION_FIELDS})
++    return Submission(**{k: coerce_text(row.get(k)) for k in SUBMISSION_FIELDS})
++
++
++def primary_code(findings: list[Finding]) -> str:
++    """The rule that decided the outcome: a reject, else a pending reason, else a warning."""
++    for severity in ("reject", "pending", "warn"):
++        for item in findings:
++            if item.severity == severity:
++                return item.code
++    return "—"
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -213,8 +228,9 @@ def run_batch(
+     on_progress(done, total, vendor_name, status_or_None) is called after
+     each vendor finishes.  `status` is None while running.
+     """
+-    if existing is None:
+-        existing = db.load_registry()
++    # Work on a private copy: every vendor saved below joins it, so a company that
++    # appears twice in one batch is judged against its own earlier row.
++    existing = list(db.load_registry() if existing is None else existing)
+ 
+     results: list[BatchResult] = []
+     total = len(items)
+@@ -244,8 +260,23 @@ def run_batch(
+ 
+             result = run_pipeline(submission, documents, existing, scenario_id=None)
+             submission_id, reference = db.save_run(result)
+-
+-            top_code = result.findings[0].code if result.findings else "—"
++            vendor_id = db.vendor_id_for_submission(submission_id)
++            if vendor_id is not None:
++                existing.append(
++                    ExistingVendor(
++                        id=vendor_id,
++                        legal_name=submission.legal_name,
++                        country=submission.country,
++                        tax_id=submission.tax_id,
++                        registration_number=submission.registration_number,
++                        account_number=submission.account_number,
++                        bank_code=submission.bank_code,
++                        contact_email=submission.contact_email,
++                        status=result.status,
++                    )
++                )
++
++            top_code = primary_code(result.findings)
+             elapsed_ms = int((time.perf_counter() - t0) * 1000)
+ 
+             br = BatchResult(
+@@ -352,7 +383,7 @@ _SAMPLE_ROWS: list[dict] = [
+     },
+     {
+         "legal_name": "GlobalMart Retail Pvt Ltd", "trade_name": "GlobalMart",
+-        "country": "India", "tax_id": _gstin("16", "AABCG7890I"),
++        "country": "India", "tax_id": _gstin("19", "AABCG7890I"),
+         "registration_number": "U52100WB2019PTC111007",
+         "address": "3 Park Street, Kolkata, West Bengal 700016",
+         "contact_name": "Ananya Das", "contact_email": "ananya@globalmart.in",
+@@ -432,7 +463,7 @@ _SAMPLE_ROWS: list[dict] = [
+     },
+     {
+         "legal_name": "Orion Infra Pvt Ltd", "trade_name": "Orion Infra",
+-        "country": "India", "tax_id": _gstin("03", "AABCO5678Q"),
++        "country": "India", "tax_id": _gstin("04", "AABCO5678Q"),
+         "registration_number": "U45400PB2017PTC111015",
+         "address": "22 Sector 17, Chandigarh 160017",
+         "contact_name": "Gurpreet Sandhu", "contact_email": "gurpreet@orioninfra.in",
+diff --git a/backend/duplicate_detector.py b/backend/duplicate_detector.py
+index 58da2ac..2ec590f 100644
+--- a/backend/duplicate_detector.py
++++ b/backend/duplicate_detector.py
+@@ -7,8 +7,16 @@ from database.models import ExistingVendor, Finding, Submission
+ 
+ 
+ def find_duplicates(
+-    submission: Submission, existing: list[ExistingVendor]
++    submission: Submission,
++    existing: list[ExistingVendor],
++    exclude_vendor_id: int | None = None,
+ ) -> tuple[list[Finding], int | None]:
++    """Compare a submission with the registry.
++
++    ``exclude_vendor_id`` removes the submitting vendor's own record, so a reply
++    to an earlier submission is never matched against itself.
++    """
++    existing = _without(existing, exclude_vendor_id)
+     tax = _tax(submission.tax_id)
+     registration = _token(submission.registration_number)
+     account = _digits(submission.account_number)
+@@ -66,7 +74,7 @@ def find_duplicates(
+     pool = approved or identity
+     vendor, reasons = max(pool, key=lambda hit: _rank(hit[0], hit[1]))
+     reason_text = _join(reasons)
+-    if vendor.status != "approved":
++    if vendor_status(vendor) != "approved":
+         return [
+             Finding(
+                 code="prior_submission",
+@@ -130,8 +138,13 @@ def _shared_account(submission: Submission, existing: list[ExistingVendor]) -> E
+     return None
+ 
+ 
+-def blocked_vendor(submission: Submission, existing: list[ExistingVendor]) -> Finding | None:
++def blocked_vendor(
++    submission: Submission,
++    existing: list[ExistingVendor],
++    exclude_vendor_id: int | None = None,
++) -> Finding | None:
+     """A vendor the company has already blocked on this tax ID or registration cannot be onboarded."""
++    existing = _without(existing, exclude_vendor_id)
+     tax = _tax(submission.tax_id)
+     registration = _token(submission.registration_number)
+     for vendor in existing:
+@@ -157,7 +170,13 @@ def blocked_vendor(submission: Submission, existing: list[ExistingVendor]) -> Fi
+ 
+ 
+ def vendor_status(vendor: ExistingVendor) -> str:
+-    return (vendor.status or "").lower()
++    return (vendor.status or "").strip().lower()
++
++
++def _without(existing: list[ExistingVendor], vendor_id: int | None) -> list[ExistingVendor]:
++    if vendor_id is None:
++        return list(existing)
++    return [vendor for vendor in existing if vendor.id != vendor_id]
+ 
+ 
+ def _rank(vendor: ExistingVendor, reasons: list[str]) -> int:
+@@ -166,7 +185,7 @@ def _rank(vendor: ExistingVendor, reasons: list[str]) -> int:
+         score += 4
+     if "registration number" in reasons:
+         score += 2
+-    if vendor.status == "approved":
++    if vendor_status(vendor) == "approved":
+         score += 1
+     return score
+ 
+diff --git a/backend/field_validator.py b/backend/field_validator.py
+index e676114..8796975 100644
+--- a/backend/field_validator.py
++++ b/backend/field_validator.py
+@@ -251,7 +251,7 @@ def validate_submission(submission: Submission) -> list[Finding]:
+                     "Please send a 10-digit Indian mobile number, for example 9876543210.",
+                 )
+             )
+-        elif submission.country == "United States" and not re.fullmatch(r"1?\d{10}", digits):
++        elif submission.country == "United States" and not re.fullmatch(r"(?:\+?1)?\d{10}", phone):
+             findings.append(
+                 _finding(
+                     "bad_phone",
+diff --git a/backend/layout_parser.py b/backend/layout_parser.py
+index 3b21a5b..62a3a56 100644
+--- a/backend/layout_parser.py
++++ b/backend/layout_parser.py
+@@ -216,6 +216,11 @@ def match_label(text: str) -> str:
+     stripped = _TRAILING_FILLER.sub("", cleaned).strip()
+     if stripped and stripped != cleaned:
+         candidates.append(stripped)
++    # A label that matches an alias as printed wins over one that only matches after
++    # its trailing "code"/"no"/"number" is trimmed: "Bank Code" is not "Bank".
++    for field_name, aliases in FIELD_ALIASES.items():
++        if any(cleaned == _normalise_label(alias) for alias in aliases):
++            return field_name
+     best_field, best_score = "", 0.0
+     for field_name, aliases in FIELD_ALIASES.items():
+         for alias in aliases:
+diff --git a/backend/ocr_engine.py b/backend/ocr_engine.py
+index 63e01ac..a212441 100644
+--- a/backend/ocr_engine.py
++++ b/backend/ocr_engine.py
+@@ -169,7 +169,10 @@ def _normalize_gemini(payload, page: int) -> list[TextWord]:
+             f"{FIELD_LABELS[field]}: {_clean_ocr_field(field, fields.get(field))}"
+             for field in FIELDS if _clean_ocr_field(field, fields.get(field))
+         ]
+-        lines.extend(_lines("\n".join(semantic_lines), page, start=len(lines)))
++        # Start below the last transcript row, not after the *count* of rows: blank
++        # transcript lines use up row numbers and would otherwise collide with these.
++        next_row = int(max(word.y0 for word in lines) // 20) + 1 if lines else 0
++        lines.extend(_lines("\n".join(semantic_lines), page, start=next_row))
+     return lines
+ 
+ 
+diff --git a/backend/reply_runner.py b/backend/reply_runner.py
+index facc135..64c6d5e 100644
+--- a/backend/reply_runner.py
++++ b/backend/reply_runner.py
+@@ -81,6 +81,74 @@ def bundle_to_submission(bundle: dict) -> Submission:
+     )
+ 
+ 
++def _carried_document_findings(parent_bundle: dict, slot: str, p_doc: dict) -> list[Finding]:
++    """Document findings from the parent run that still hold for an unchanged upload.
++
++    Findings are attached to a slot by the state of the stored document and the
++    file name in the message, not by the slot name appearing in the text: a
++    flagged upload (unreadable, wrong slot, nothing read) must stay flagged until
++    the vendor replaces it.
++    """
++    filename = p_doc.get("filename") or ""
++    parse_status = p_doc.get("parse_status")
++    document_type = p_doc.get("document_type")
++    has_fields = any(str(value or "").strip() for value in (p_doc.get("fields") or {}).values())
++
++    still_applies = {
++        "unreadable_document": parse_status != "parsed",
++        "wrong_document": parse_status == "parsed" and document_type == "wrong_slot",
++        "extraction_unclear": parse_status == "parsed" and document_type != "wrong_slot" and not has_fields,
++        "ocr_low_confidence": True,
++    }
++    carried: list[Finding] = []
++    seen: set[str] = set()
++    for item in parent_bundle.get("findings", []):
++        code = item.get("code")
++        if item.get("stage") != "documents" or not still_applies.get(code, False):
++            continue
++        if filename and filename not in item.get("message", ""):
++            continue
++        if code in seen:
++            continue
++        seen.add(code)
++        carried.append(
++            Finding(
++                code=code,
++                severity=item["severity"],
++                stage=item["stage"],
++                message=item["message"],
++                vendor_message=item.get("vendor_message"),
++            )
++        )
++
++    # Older runs, or findings with unexpected wording: rebuild what the stored state implies.
++    if parse_status != "parsed" and "unreadable_document" not in seen:
++        carried.append(
++            Finding(
++                code="unreadable_document",
++                severity="pending",
++                stage="documents",
++                message=f"{filename or slot} could not be parsed as text.",
++                vendor_message=(
++                    f"The file {filename or slot} could not be read. "
++                    "Please upload a readable PDF or a plain text copy."
++                ),
++            )
++        )
++    elif parse_status == "parsed" and document_type == "wrong_slot" and "wrong_document" not in seen:
++        expected = KIND_LABEL.get(SLOT_KIND.get(slot, ""), "document")
++        carried.append(
++            Finding(
++                code="wrong_document",
++                severity="pending",
++                stage="documents",
++                message=f"{filename or slot} was uploaded as a {expected}, but it reads like a different document.",
++                vendor_message=f"The file {filename or slot} does not look like a {expected}. Please upload the {expected}.",
++            )
++        )
++    return carried
++
++
+ def identify_changes(
+     original: Submission,
+     updated: Submission,
+@@ -244,6 +312,8 @@ def run_vendor_reply(
+     """
+     new_documents = new_documents or {}
+     existing = existing or []
++    # The vendor row is updated in place by a reply, so it must never be compared with itself.
++    own_vendor_id = (parent_bundle.get("vendor") or {}).get("id")
+     parent_sub = parent_bundle["submission"]
+     parent_id = parent_sub["id"]
+     parent_ref = parent_sub["reference"]
+@@ -418,17 +488,7 @@ def run_vendor_reply(
+             )
+             parsed_docs.append(parsed_doc)
+             # Carry forward any uncorrected findings for this unchanged slot
+-            for f in parent_bundle.get("findings", []):
+-                if f.get("stage") == "documents" and slot in f.get("message", ""):
+-                    doc_findings.append(
+-                        Finding(
+-                            code=f["code"],
+-                            severity=f["severity"],
+-                            stage=f["stage"],
+-                            message=f["message"],
+-                            vendor_message=f.get("vendor_message"),
+-                        )
+-                    )
++            doc_findings.extend(_carried_document_findings(parent_bundle, slot, p_doc))
+             doc_details.append(f"Preserved {p_doc['filename']} ({slot}) from original run (0 extraction calls).")
+         else:
+             # Document missing
+@@ -504,14 +564,19 @@ def run_vendor_reply(
+     cross_bank_affected = "bank_proof" in changed_slots or bool(
+         changed_fields.intersection({"bank_holder_name", "bank_name", "account_number", "bank_code"})
+     )
++    # Payout country is compared with the vendor country and the tax ID's home country.
++    cross_payout_country_affected = bool(changed_fields.intersection({"bank_country", "country", "tax_id"}))
+     cross_state_affected = bool(changed_fields.intersection({"tax_id", "address"}))
+-    cross_jurisdiction_affected = "country" in changed_fields or bool(changed_slots)
++    cross_jurisdiction_affected = (
++        bool(changed_fields.intersection({"country", "bank_country"})) or bool(changed_slots)
++    )
+ 
+     any_cross_affected = (
+         cross_incorp_affected
+         or cross_tax_affected
+         or cross_bank_affected
+         or cross_state_affected
++        or cross_payout_country_affected
+         or cross_jurisdiction_affected
+     )
+ 
+@@ -525,6 +590,8 @@ def run_vendor_reply(
+             affected_cross_parts.append("bank proof")
+         if cross_state_affected:
+             affected_cross_parts.append("state vs address")
++        if cross_payout_country_affected or cross_jurisdiction_affected:
++            affected_cross_parts.append("payout country")
+         affected_rules.append(f"Cross-document verification ({', '.join(affected_cross_parts)})")
+ 
+         cross_findings, cross_checks = cross_verification.cross_check(updated_submission, parsed_docs)
+@@ -575,8 +642,12 @@ def run_vendor_reply(
+     dup_affected = bool(changed_fields.intersection(DUPLICATE_KEYS))
+     if dup_affected:
+         affected_rules.append(f"Duplicate & blocklist detection (identifiers: {', '.join(sorted(changed_fields.intersection(DUPLICATE_KEYS)))})")
+-        dup_findings, duplicate_of = duplicate_detector.find_duplicates(updated_submission, existing)
+-        blocked = duplicate_detector.blocked_vendor(updated_submission, existing)
++        dup_findings, duplicate_of = duplicate_detector.find_duplicates(
++            updated_submission, existing, exclude_vendor_id=own_vendor_id
++        )
++        blocked = duplicate_detector.blocked_vendor(
++            updated_submission, existing, exclude_vendor_id=own_vendor_id
++        )
+         if blocked is not None:
+             dup_findings.append(blocked)
+         findings.extend(dup_findings)
+diff --git a/backend/submission_loader.py b/backend/submission_loader.py
+index 765b01d..c245d97 100644
+--- a/backend/submission_loader.py
++++ b/backend/submission_loader.py
+@@ -39,6 +39,15 @@ class LoadedSubmission:
+         return {doc.slot for doc in self.documents}
+ 
+ 
++def coerce_text(value) -> str:
++    """Text form of a JSON/CSV value: null is empty, whole numbers lose a trailing ``.0``."""
++    if value is None:
++        return ""
++    if isinstance(value, float) and value.is_integer():
++        return str(int(value))
++    return str(value)
++
++
+ def submission_from_payload(data: dict) -> Submission:
+     if not isinstance(data, dict):
+         raise SubmissionLoadError("'submission' must be a JSON object.")
+@@ -46,7 +55,7 @@ def submission_from_payload(data: dict) -> Submission:
+     unknown = sorted(set(data) - allowed)
+     if unknown:
+         raise SubmissionLoadError(f"Unknown submission field(s): {', '.join(unknown)}")
+-    return Submission(**{key: str(value) for key, value in data.items()})
++    return Submission(**{key: coerce_text(value) for key, value in data.items()})
+ 
+ 
+ def load_payload(
+diff --git a/database/db.py b/database/db.py
+index c05962a..1f849b1 100644
+--- a/database/db.py
++++ b/database/db.py
+@@ -239,6 +239,14 @@ def load_registry() -> list[ExistingVendor]:
+     ]
+ 
+ 
++def vendor_id_for_submission(submission_id: int) -> int | None:
++    with connect() as conn:
++        row = conn.execute(
++            "SELECT vendor_id FROM submissions WHERE id = ?", (submission_id,)
++        ).fetchone()
++    return int(row["vendor_id"]) if row else None
++
++
+ def list_registry() -> list[dict]:
+     with connect() as conn:
+         rows = conn.execute(
+@@ -502,7 +510,8 @@ def _submission_select() -> str:
+         "(SELECT COUNT(*) FROM findings f WHERE f.submission_id = s.id "
+         " AND f.severity IN ('pending','reject')) AS issue_count, "
+         "(SELECT f.message FROM findings f WHERE f.submission_id = s.id "
+-        " AND f.severity IN ('pending','reject') ORDER BY f.id LIMIT 1) AS top_issue "
++        " AND f.severity IN ('pending','reject') "
++        " ORDER BY CASE f.severity WHEN 'reject' THEN 0 ELSE 1 END, f.id LIMIT 1) AS top_issue "
+         "FROM submissions s "
+         "JOIN vendors v ON v.id = s.vendor_id "
+         "LEFT JOIN submissions p ON p.id = s.parent_id"
+diff --git a/tests/test_regressions.py b/tests/test_regressions.py
+new file mode 100644
+index 0000000..762abc0
+--- /dev/null
++++ b/tests/test_regressions.py
+@@ -0,0 +1,251 @@
++"""Regression tests for the reply-loop, registry, parser and batch bugs."""
++
++from __future__ import annotations
++
++import csv
++import io
++import json
++import zipfile
++from dataclasses import replace
++
++import pytest
++
++from backend import batch_runner, layout_parser, ocr_engine, submission_loader
++from backend.batch_runner import parse_csv, row_to_submission, run_batch
++from backend.duplicate_detector import find_duplicates
++from backend.field_validator import validate_submission
++from backend.pipeline import run_pipeline
++from backend.reply_runner import bundle_to_submission, run_vendor_reply
++from database import db
++from database.models import DocumentFile, ExistingVendor, Submission
++from tests.factories import make_documents, make_vendor
++import random
++
++
++@pytest.fixture(autouse=True)
++def isolated_db(tmp_path, monkeypatch):
++    monkeypatch.setattr(db, "DB_PATH", tmp_path / "regress.db")
++    monkeypatch.setattr(db, "_READY", False)
++    db.init_db()
++
++
++def _save(result):
++    submission_id, _ = db.save_run(result)
++    return db.get_submission_bundle(submission_id)
++
++
++def _vendor(seed=3) -> Submission:
++    return make_vendor(random.Random(seed))
++
++
++def _codes(result):
++    return {f.code for f in result.findings}
++
++
++# ------------------------------------------------------------ reply loop
++
++
++def test_reply_keeps_unreadable_document_finding_on_unrelated_change():
++    sub = _vendor()
++    docs = [d for d in make_documents(sub) if d.slot != "bank_proof"]
++    docs.append(DocumentFile("bank_proof", "cheque.pdf", b"%PDF-1.4 not really a pdf"))
++    first = run_pipeline(sub, docs, db.load_registry())
++    assert "unreadable_document" in _codes(first)
++    bundle = _save(first)
++
++    updated = bundle_to_submission(bundle)
++    updated.contact_name = "Someone Else"
++    reply, _ = run_vendor_reply(bundle, updated, {}, db.load_registry())
++    assert "unreadable_document" in _codes(reply)
++    assert reply.status == "pending"
++
++
++def test_reply_keeps_wrong_slot_finding_on_unrelated_change():
++    sub = _vendor()
++    docs = {d.slot: d for d in make_documents(sub)}
++    wrong = DocumentFile("bank_proof", "oops.txt", docs["tax_certificate"].content)
++    first = run_pipeline(sub, [docs["incorporation"], docs["tax_certificate"], wrong], db.load_registry())
++    assert "wrong_document" in _codes(first)
++    bundle = _save(first)
++
++    updated = bundle_to_submission(bundle)
++    updated.trade_name = "Renamed Trading"
++    reply, _ = run_vendor_reply(bundle, updated, {}, db.load_registry())
++    assert "wrong_document" in _codes(reply)
++    assert reply.status == "pending"
++
++
++def test_reply_correcting_bank_country_clears_cross_border_bank():
++    sub = replace(_vendor(), bank_country="United States")
++    first = run_pipeline(sub, make_documents(sub), db.load_registry())
++    assert "cross_border_bank" in _codes(first)
++    bundle = _save(first)
++
++    updated = bundle_to_submission(bundle)
++    updated.bank_country = "India"
++    reply, diff = run_vendor_reply(bundle, updated, {}, db.load_registry())
++    assert "cross_border_bank" not in _codes(reply)
++    assert any(f.code == "cross_border_bank" for f in diff.resolved_findings)
++    assert reply.status == "approved"
++
++
++def test_reply_is_not_matched_against_its_own_record():
++    sub = _vendor()
++    docs = [d for d in make_documents(sub) if d.slot != "tax_certificate"]
++    first = run_pipeline(sub, docs, db.load_registry())
++    assert first.status == "pending"
++    bundle = _save(first)
++
++    updated = bundle_to_submission(bundle)
++    updated.account_number = updated.account_number[:-1] + "0"
++    reply, _ = run_vendor_reply(bundle, updated, {}, db.load_registry())
++    assert "prior_submission" not in _codes(reply)
++    assert reply.duplicate_of is None
++
++
++def test_reply_on_approved_record_does_not_trigger_payout_change_reject():
++    sub = _vendor()
++    first = run_pipeline(sub, make_documents(sub), db.load_registry())
++    assert first.status == "approved"
++    bundle = _save(first)
++
++    updated = bundle_to_submission(bundle)
++    updated.account_number = updated.account_number[:-1] + "0"
++    reply, _ = run_vendor_reply(bundle, updated, {}, db.load_registry())
++    assert "duplicate_bank_change" not in _codes(reply)
++    assert reply.status != "rejected"
++
++
++# ------------------------------------------------------------ registry
++
++
++def _registry_vendor(status: str) -> ExistingVendor:
++    return ExistingVendor(
++        id=7, legal_name="Acme Pvt Ltd", country="India", tax_id="27AABCA1234C1Z5",
++        registration_number="U11111MH2010PTC111111", account_number="1234567890",
++        bank_code="HDFC0001234", contact_email="a@acme.in", status=status,
++    )
++
++
++@pytest.mark.parametrize("status", ["approved", "Approved", "APPROVED"])
++def test_registry_status_is_case_insensitive(status):
++    sub = Submission(
++        legal_name="Acme Pvt Ltd", country="India", tax_id="27AABCA1234C1Z5",
++        account_number="9999999999", bank_code="HDFC0001234",
++    )
++    findings, duplicate_of = find_duplicates(sub, [_registry_vendor(status)])
++    assert [f.code for f in findings] == ["duplicate_bank_change"]
++    assert duplicate_of == 7
++
++
++def test_find_duplicates_can_skip_a_vendor_record():
++    sub = Submission(legal_name="Acme Pvt Ltd", country="India", tax_id="27AABCA1234C1Z5")
++    findings, duplicate_of = find_duplicates(sub, [_registry_vendor("pending")], exclude_vendor_id=7)
++    assert findings == [] and duplicate_of is None
++
++
++# ------------------------------------------------------------ batch
++
++
++def _sample_row(index=0) -> dict:
++    row = dict(batch_runner._SAMPLE_ROWS[index])
++    row["_row"] = index + 2
++    return row
++
++
++def test_same_company_twice_in_one_batch_is_not_approved_twice():
++    results = run_batch([_sample_row(0), _sample_row(0)], "csv", existing=db.load_registry())
++    assert results[0].status == "approved"
++    assert results[1].status != "approved"
++
++
++def test_same_company_twice_with_registry_loaded_by_runner():
++    results = run_batch([_sample_row(1), _sample_row(1)], "csv")
++    assert [r.status for r in results][0] == "approved"
++    assert results[1].status != "approved"
++
++
++def test_csv_rows_with_extra_columns_do_not_crash():
++    header = ",".join(batch_runner.SUBMISSION_FIELDS)
++    row = ",".join(str(_sample_row(0)[f]).replace(",", " ") for f in batch_runner.SUBMISSION_FIELDS)
++    rows = parse_csv(f"{header}\n{row},unexpected,another\n".encode())
++    assert len(rows) == 1
++    assert None not in rows[0]
++    results = run_batch(rows, "csv", existing=db.load_registry())
++    assert results[0].status != "error"
++
++
++def test_row_to_submission_handles_null_and_numbers():
++    sub = row_to_submission({"legal_name": "X Ltd", "address": None, "contact_phone": 9876543210, "bank_name": 110019.0})
++    assert sub.address == ""
++    assert sub.contact_phone == "9876543210"
++    assert sub.bank_name == "110019"
++
++
++def test_zip_with_null_and_numeric_values_does_not_crash():
++    base = {k: batch_runner._SAMPLE_ROWS[0][k] for k in batch_runner.SUBMISSION_FIELDS}
++    base["trade_name"] = None
++    base["address"] = "11 Nehru Place, New Delhi 110019"
++    base["contact_phone"] = 9876500001
++    buf = io.BytesIO()
++    with zipfile.ZipFile(buf, "w") as zf:
++        zf.writestr("v.json", json.dumps({"submission": base}))
++    items = batch_runner.parse_zip(buf.getvalue())
++    results = run_batch(items, "zip", existing=db.load_registry())
++    assert results[0].status != "error", results[0].error
++
++
++def test_sample_csv_labels_match_outcomes():
++    rows = parse_csv(batch_runner.sample_csv_bytes())
++    results = run_batch(rows, "csv", existing=db.load_registry())
++    by_name = {r.vendor_name: r for r in results}
++    assert all(r.status != "error" for r in results), [r.error for r in results if r.error]
++    for name in ("GlobalMart Retail Pvt Ltd", "Orion Infra Pvt Ltd"):
++        assert by_name[name].status == "approved", (name, by_name[name].top_code)
++    assert sum(1 for r in results[:15] if r.status == "approved") == 15
++    assert by_name["Bluepeak Traders Pvt Ltd"].status == "rejected"
++
++
++def test_primary_rule_is_the_decisive_rule():
++    rows = parse_csv(batch_runner.sample_csv_bytes())
++    bluepeak = next(r for r in rows if r["legal_name"].startswith("Bluepeak"))
++    from test_data.seed import ensure_seed
++    ensure_seed()
++    results = run_batch([bluepeak], "csv", existing=db.load_registry())
++    assert results[0].status == "rejected"
++    assert results[0].top_code == "blocked_vendor"
++
++
++# ------------------------------------------------------------ parsers
++
++
++@pytest.mark.parametrize(
++    "label,expected",
++    [("Bank Code", "bank_code"), ("Bank Name", "bank_name"), ("Bank", "bank_name"), ("IFSC", "bank_code")],
++)
++def test_bank_code_label_is_not_read_as_bank_name(label, expected):
++    assert layout_parser.match_label(label) == expected
++
++
++def test_gemini_rows_do_not_overlap_when_transcript_has_blank_lines():
++    payload = {"candidates": [{"content": {"parts": [{"text": json.dumps({
++        "text": "Cancelled Cheque\n\nAccount number: 123456789\n\n\nIFSC: HDFC0001234",
++        "fields": {"account_number": "123456789", "bank_code": "HDFC0001234"},
++    })}]}}]}
++    words = ocr_engine._normalize_gemini(payload, 0)
++    ys = [w.y0 for w in words]
++    assert len(ys) == len(set(ys)), ys
++    assert len(words) == 5
++
++
++def test_us_phone_with_plus_one_is_valid():
++    sub = replace(_vendor(), country="United States", contact_phone="+1 (415) 555-0001")
++    assert "bad_phone" not in {f.code for f in validate_submission(sub)}
++    bad = replace(sub, contact_phone="+1 415 555")
++    assert "bad_phone" in {f.code for f in validate_submission(bad)}
++
++
++def test_json_null_becomes_empty_text():
++    sub = submission_loader.submission_from_payload({"legal_name": "A Ltd", "trade_name": None, "address": 110019})
++    assert sub.trade_name == ""
++    assert sub.address == "110019"

@@ -251,7 +251,7 @@ def validate_submission(submission: Submission) -> list[Finding]:
                     "Please send a 10-digit Indian mobile number, for example 9876543210.",
                 )
             )
-        elif submission.country == "United States" and not re.fullmatch(r"1?\d{10}", digits):
+        elif submission.country == "United States" and not re.fullmatch(r"(?:\+?1)?\d{10}", phone):
             findings.append(
                 _finding(
                     "bad_phone",

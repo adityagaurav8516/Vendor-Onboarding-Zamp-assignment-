@@ -39,6 +39,15 @@ class LoadedSubmission:
         return {doc.slot for doc in self.documents}
 
 
+def coerce_text(value) -> str:
+    """Text form of a JSON/CSV value: null is empty, whole numbers lose a trailing ``.0``."""
+    if value is None:
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
 def submission_from_payload(data: dict) -> Submission:
     if not isinstance(data, dict):
         raise SubmissionLoadError("'submission' must be a JSON object.")
@@ -46,7 +55,7 @@ def submission_from_payload(data: dict) -> Submission:
     unknown = sorted(set(data) - allowed)
     if unknown:
         raise SubmissionLoadError(f"Unknown submission field(s): {', '.join(unknown)}")
-    return Submission(**{key: str(value) for key, value in data.items()})
+    return Submission(**{key: coerce_text(value) for key, value in data.items()})
 
 
 def load_payload(
